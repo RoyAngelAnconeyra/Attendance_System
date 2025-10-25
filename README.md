@@ -101,31 +101,69 @@ npm run dev
 
 Puedes crear la BD con SQL puro o con utilidades `createdb/psql`.
 
-- **Opción A: SQL (desde psql)**
+- **SQL (desde psql)**
   ```sql
-  -- Conéctate a PostgreSQL como superusuario o usuario con privilegios
-  -- Crear usuario (si no existe)
-  CREATE USER root WITH PASSWORD 'root';
+  CREATE DATABASE attendance_db;
+  -- 1) Tabla de usuarios
+  -- Roles: admin | docente | estudiante (usamos CHECK para emular Enum)
+  CREATE TABLE users (
+    id               SERIAL PRIMARY KEY,
+    email            VARCHAR(255) NOT NULL UNIQUE,
+    password_hash    VARCHAR(255) NOT NULL,
+    nombres          VARCHAR(255) NOT NULL,
+    apellidos        VARCHAR(255) NOT NULL,
+    rol              VARCHAR(20)  NOT NULL CHECK (rol IN ('admin','docente','estudiante'))
+  );
 
-  -- Crear base de datos
-  CREATE DATABASE attendance_db OWNER root ENCODING 'UTF8';
+  CREATE INDEX idx_users_email ON users(email);
 
-  -- Conceder privilegios
-  GRANT ALL PRIVILEGES ON DATABASE attendance_db TO root;
+  -- 2) Tabla de estudiantes (1:1 con users; un usuario solo puede tener un student)
+  CREATE TABLE students (
+    id             SERIAL PRIMARY KEY,
+    user_id        INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    codigo         VARCHAR(50) NOT NULL UNIQUE,   -- CUI
+    carrera        VARCHAR(255),
+    uses_glasses   INTEGER DEFAULT 0,             -- flags 0/1 sencillos
+    uses_cap       INTEGER DEFAULT 0,
+    uses_mask      INTEGER DEFAULT 0,
+    embedding      TEXT                           -- opcional (no usado por ahora)
+  );
+
+  CREATE INDEX idx_students_codigo ON students(codigo);
+
+  -- 3) Cursos (pertenecen a un docente que es un user)
+  CREATE TABLE courses (
+    id          SERIAL PRIMARY KEY,
+    docente_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    nombre      VARCHAR(255) NOT NULL,
+    codigo      VARCHAR(50) NOT NULL UNIQUE,
+    horario     VARCHAR(255)
+  );
+
+  -- 4) Matriculas (N:M entre students y courses) con restricción de unicidad
+  CREATE TABLE enrollments (
+    id             SERIAL PRIMARY KEY,
+    estudiante_id  INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    curso_id       INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+    CONSTRAINT uq_enrollment_student_course UNIQUE (estudiante_id, curso_id)
+  );
+
+  -- 5) Asistencia
+  -- Estados: presente | ausente (CHECK para emular Enum)
+  -- fecha_hora: la app guarda hora local (Perú) como naive (sin tz)
+  CREATE TABLE attendance (
+    id             SERIAL PRIMARY KEY,
+    estudiante_id  INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    curso_id       INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+    fecha_hora     TIMESTAMP NOT NULL DEFAULT NOW(),
+    estado         VARCHAR(20) NOT NULL CHECK (estado IN ('presente','ausente'))
+  );
+
+  CREATE INDEX idx_attendance_fecha ON attendance(fecha_hora);
+  CREATE INDEX idx_attendance_curso ON attendance(curso_id);
+  CREATE INDEX idx_attendance_estudiante ON attendance(estudiante_id);
   ```
 
-- **Opción B: utilidades de línea de comando**
-  ```bash
-  # Windows PowerShell / CMD
-  # Crear DB (requiere que el servicio de PostgreSQL esté corriendo)
-  createdb -h 127.0.0.1 -p 5432 -U postgres attendance_db
-
-  # (opcional) crear usuario
-  psql -h 127.0.0.1 -p 5432 -U postgres -c "CREATE USER root WITH PASSWORD 'root';"
-
-  # (opcional) cambiar propietario
-  psql -h 127.0.0.1 -p 5432 -U postgres -c "ALTER DATABASE attendance_db OWNER TO root;"
-  ```
 
 Luego, ajusta `backend/.env` para que `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` coincidan. Al iniciar el backend por primera vez, SQLAlchemy creará las tablas.
 
