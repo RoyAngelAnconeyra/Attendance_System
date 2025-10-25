@@ -1,0 +1,7 @@
+opencv-python==4.8.1.78
+numpy==1.23.5
+tensorflow==2.10.0
+keras-facenet==0.3.2
+scikit-learn==1.2.2
+mtcnn==0.1.1
+kaggle

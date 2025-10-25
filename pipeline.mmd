@@ -1,0 +1,89 @@
+graph TB
+    subgraph "CAPA 1: CAPTURA DE VIDEO"
+        A[Cámara Física]
+        B[Interfaz de Captura]
+        C[Pre-procesamiento<br/>de Frames]
+        
+        A -->|Stream de Video| B
+        B -->|Frames RGB| C
+    end
+    
+    subgraph "COMUNICACIÓN"
+        D[WebSocket Client]
+        E[Compresión JPEG]
+        
+        C -->|Frames crudos| E
+        E -->|Frames comprimidos| D
+    end
+    
+    subgraph "CAPA 2: BACKEND - FastAPI"
+        F[WebSocket Server]
+        G[Queue Manager<br/>Cola de Frames]
+        
+        subgraph "Procesamiento ML"
+            H[MTCNN<br/>Detección Facial<br/>Multi-task CNN]
+            I[Face Alignment<br/>Landmarks Faciales<br/>Ojos, Nariz, Boca]
+            J[FaceNet<br/>Extracción Embeddings<br/>512 Dimensiones]
+            K[Clasificador SVM<br/>Kernel Lineal<br/>Identificación]
+        end
+        
+        L[(PostgreSQL)]
+        M[API REST<br/>Endpoints]
+        N[Registro de Asistencia]
+        
+        D -.->|WebSocket| F
+        F -->|Buffer| G
+        G -->|Frame| H
+        H -->|Rostros detectados| I
+        I -->|Rostros alineados| J
+        J -->|Embeddings 512D| K
+        K <-->|Query embeddings| L
+        K -->|Match encontrado| N
+        N -->|INSERT| L
+        M <-->|CRUD| L
+    end
+    
+    subgraph "CAPA 3: FRONTEND - React"
+        O[WebSocket Client]
+        P[Dashboard Docente]
+        Q[Lista Asistencia<br/>Tiempo Real]
+        R[Gestión Estudiantes]
+        T[HTTP Client<br/>Axios]
+        
+        O -.->|WebSocket| F
+        T -.->|REST API| M
+        O -->|Resultados| Q
+        T -->|Datos históricos| R
+        P --> Q
+        P --> R
+    end
+    
+    subgraph "BASE DE DATOS - PostgreSQL"
+        L1[(Tabla: students)]
+        L2[(Tabla: attendance)]
+        L3[(Tabla: courses)]
+        L4[(Tabla: users)]
+        
+        L --> L1
+        L --> L2
+        L --> L3
+        L --> L4
+    end
+    
+    N -.->|Notificación| O
+    
+    style A fill:#e1f5ff
+    style B fill:#e1f5ff
+    style C fill:#e1f5ff
+    style H fill:#ffe1e1
+    style I fill:#ffe1e1
+    style J fill:#ffe1e1
+    style K fill:#ffe1e1
+    style L fill:#fff4e1
+    style L1 fill:#fff4e1
+    style L2 fill:#fff4e1
+    style L3 fill:#fff4e1
+    style L4 fill:#fff4e1
+    style P fill:#e1ffe1
+    style Q fill:#e1ffe1
+    style R fill:#e1ffe1

@@ -1,0 +1,207 @@
+# ============================================
+# CREDENCIALES Y DATOS SENSIBLES
+# ============================================
+# Kaggle API credentials (¡NUNCA versionar!)
+kaggle.json
+
+# Variables de entorno
+.env
+.env.local
+.env.*.local
+
+# Configuraciones con credenciales
+config.json
+credentials.json
+secrets.json
+
+# ============================================
+# DATASETS Y DESCARGAS
+# ============================================
+# Datasets descargados
+downloads/
+#dataset/
+#!dataset/.gitkeep
+
+# Archivos temporales de dataset
+*.zip
+*.tar.gz
+*.rar
+
+# ============================================
+# MODELOS ENTRENADOS (Opcional)
+# ============================================
+# Descomentar si NO quieres versionar modelos entrenados
+# *.pkl
+# *.npz
+# *.h5
+# *.pt
+# *.pth
+# *.ckpt
+
+# Logs de entrenamiento
+logs/
+runs/
+checkpoints/
+
+# ============================================
+# PYTHON
+# ============================================
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# ============================================
+# JUPYTER NOTEBOOK
+# ============================================
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+*.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# ============================================
+# IDEs Y EDITORES
+# ============================================
+# VSCode
+.vscode/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+# PyCharm
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Spyder
+.spyderproject
+.spyproject
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+.*.swp
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+
+# ============================================
+# SISTEMA OPERATIVO
+# ============================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+
+# Linux
+.directory
+.Trash-*
+
+# ============================================
+# ML/DL ESPECÍFICOS
+# ============================================
+# TensorBoard
+events.out.tfevents.*
+
+# Weights & Biases
+wandb/
+
+# MLflow
+mlruns/
+
+# DVC
+.dvc
+
+# ============================================
+# OTROS
+# ============================================
+# Archivos de respaldo
+*.bak
+*.backup
+*.old
+*.orig
+
+# Archivos temporales
+*.tmp
+*.temp
+.temp/
+tmp/
+
+# Logs generales
+*.log
+logs/
+*.json
