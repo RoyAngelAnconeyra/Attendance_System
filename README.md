@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Sistema Avanzado de Reconocimiento Facial
 
 ## 🚀 Descripción del Proyecto
