@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=120)
 
     CAMERA_INDEX: int = Field(default=0)
-    CONFIDENCE_THRESHOLD: float = Field(default=0.8)
+    CONFIDENCE_THRESHOLD: float = Field(default=0.6)
 
     @property
     def SQLALCHEMY_DATABASE_URI(self) -> str:

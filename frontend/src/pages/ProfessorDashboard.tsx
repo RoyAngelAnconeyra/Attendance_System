@@ -70,8 +70,39 @@ export default function ProfessorDashboard() {
       try {
         const data = JSON.parse(ev.data)
         const ts = Date.now()
-        setLive(prev => [{ ...data, ts }, ...prev].slice(0, 20))
-      } catch {}
+        
+        // Actualizar la lista de reconocimientos
+        setLive(prev => {
+          const newLive = [{ ...data, ts }, ...prev].slice(0, 20)
+          
+          // Si es un reconocimiento exitoso, actualizar la lista de estudiantes
+          if (data.event === 'prediction' && data.codigo) {
+            const studentCui = data.codigo
+            const confidence = data.confidence || 0
+            const isRecognized = confidence >= 0.6
+            
+            setStudents(prevStudents => 
+              prevStudents.map(student => {
+                if (student.codigo === studentCui) {
+                  return {
+                    ...student,
+                    lastRecognition: {
+                      ts,
+                      confidence,
+                      recognized: isRecognized
+                    }
+                  }
+                }
+                return student
+              })
+            )
+          }
+          
+          return newLive
+        })
+      } catch (e) {
+        console.error('Error procesando mensaje WebSocket:', e)
+      }
     }
     sock.onclose = () => {
       setWsConnected(false)
@@ -118,17 +149,69 @@ export default function ProfessorDashboard() {
   }, [selected, msg])
 
   const startRecognition = async () => {
-    if (!selected) return
-    setLoading(true)
-    setMsg(null)
-    setErr(null)
+    if (!selected) return;
+    setLoading(true);
+    setMsg(null);
+    setErr(null);
+    
     try {
-      const res = await api.get('/recognize/start', { params: { course_id: selected.id, duration_minutes: 2 } })
-      setMsg(res.data?.message || 'Sesión iniciada (demo)')
+      // 1. Iniciar el reconocimiento
+      const res = await api.get('/recognize/start', { 
+        params: { 
+          course_id: selected.id, 
+          duration_minutes: 2 
+        } 
+      });
+      
+      setMsg(res.data?.message || 'Sesión de reconocimiento completada');
+      
+      // 2. Esperar a que termine el reconocimiento
+      setTimeout(async () => {
+        try {
+          const today = new Date();
+          const on_date = today.toISOString().slice(0, 10);
+          
+          // Obtener la lista actualizada de estudiantes
+          const studentsRes = await api.get('/students', { 
+            params: { course_id: selected.id } 
+          });
+          
+          // Obtener la asistencia actualizada
+          const attendanceRes = await api.get('/attendance', { 
+            params: { 
+              course_id: selected.id, 
+              on_date 
+            } 
+          });
+          
+          // Actualizar el estado de asistencia
+          setAttendance(attendanceRes.data || []);
+          
+          // Actualizar el estado de los estudiantes con la información de reconocimiento
+          if (studentsRes.data?.length) {
+            setStudents(studentsRes.data.map((student: Student) => {
+              const studentAttendance = attendanceRes.data?.find(
+                (a: Attendance) => a.estudiante_id === student.id
+              );
+              
+              return {
+                ...student,
+                lastRecognition: studentAttendance ? {
+                  ts: new Date().getTime(),
+                  confidence: 1,
+                  recognized: studentAttendance.estado === 'presente'
+                } : undefined
+              };
+            }));
+          }
+        } catch (e) {
+          console.error('Error al actualizar la asistencia:', e);
+        }
+      }, 2000);
     } catch (e: any) {
-      setErr(e?.response?.data?.detail || 'No se pudo iniciar reconocimiento')
+      setErr(e?.response?.data?.detail || 'No se pudo iniciar reconocimiento');
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
   }
 
@@ -179,14 +262,48 @@ export default function ProfessorDashboard() {
       <Paper sx={{ p: 2 }}>
         <Typography variant="h6" mb={1}>Reconocimiento en vivo (stream)</Typography>
         <List dense>
-          {live.map(item => (
-            <ListItemText key={item.ts} primary={item.codigo ? `${item.codigo} (${(item.confidence ?? 0).toFixed(2)})` : (item.event || 'evento')} secondary={new Date(item.ts).toLocaleTimeString()} />
-          ))}
-          {live.length === 0 && <Typography variant="body2" color="text.secondary">Sin eventos</Typography>}
+          {live.map(item => {
+            const confidence = item.confidence ?? 0;
+            const isRecognized = confidence >= 0.6;
+            const color = isRecognized ? 'success.main' : 'error.main';
+            
+            return (
+              <ListItem 
+                key={item.ts} 
+                sx={{ 
+                  bgcolor: item.codigo ? (isRecognized ? 'success.light' : 'error.light') : 'background.paper',
+                  mb: 0.5,
+                  borderRadius: 1
+                }}
+              >
+                <ListItemText 
+                  primary={
+                    <Typography 
+                      variant="body2" 
+                      color={color}
+                      fontWeight={isRecognized ? 'bold' : 'normal'}
+                    >
+                      {item.codigo || 'Desconocido'}
+                    </Typography>
+                  }
+                  secondary={
+                    <Typography variant="caption" color="text.secondary">
+                      {`${(confidence * 100).toFixed(1)}% · ${new Date(item.ts).toLocaleTimeString()}`}
+                    </Typography>
+                  }
+                />
+              </ListItem>
+            );
+          })}
+          {live.length === 0 && (
+            <Typography variant="body2" color="text.secondary" sx={{ p: 2, textAlign: 'center' }}>
+              Sin eventos de reconocimiento
+            </Typography>
+          )}
         </List>
       </Paper>
 
-      <Paper sx={{ p: 2 }}>
+      <Paper sx={{ p: 2, flex: 1 }}>
         <Typography variant="h6" mb={1}>{selected ? selected.nombre : 'Selecciona un curso'}</Typography>
         <Divider sx={{ mb: 2 }} />
         {err && <Alert severity="error" sx={{ mb: 1 }}>{err}</Alert>}
@@ -211,28 +328,68 @@ export default function ProfessorDashboard() {
         )}
         <Typography variant="subtitle1" gutterBottom>Estudiantes</Typography>
         <List dense>
-          {students.map(s => {
-            const att = attendance.filter(a => a.estudiante_id === s.id).sort((a,b)=> (a.fecha_hora||'').localeCompare(b.fecha_hora||''))[0]
-            const present = att && att.estado === 'presente'
-            const color = present ? 'success.main' : 'error.main'
-            const time = present && att?.fecha_hora ? new Date(att.fecha_hora).toLocaleTimeString() : undefined
+          {students.map(student => {
+            const lastRecog = student.lastRecognition;
+            const isRecognized = lastRecog?.recognized;
+            const bgColor = lastRecog 
+              ? (isRecognized ? 'success.light' : 'error.light') 
+              : 'background.paper';
+            
             return (
-              <ListItem key={s.id} sx={{
-                borderLeft: theme => `4px solid ${theme.palette[present ? 'success' : 'error'].main}`,
-                bgcolor: theme => theme.palette.action.hover,
-                mb: 0.5,
-                borderRadius: 1,
-              }}>
-                <ListItemText
-                  primaryTypographyProps={{ sx: { color, fontWeight: 700 } }}
-                  secondaryTypographyProps={{ sx: { fontWeight: 500 } }}
-                  primary={`${s.codigo}${present && time ? ` · ${time}` : ''}`}
-                  secondary={s.carrera || (present ? 'Presente' : 'Ausente')}
-                />
+              <ListItem 
+                key={student.id}
+                sx={{
+                  bgcolor: bgColor,
+                  mb: 0.5,
+                  borderRadius: 1,
+                  transition: 'background-color 0.3s ease',
+                  borderLeft: theme => `4px solid ${
+                    lastRecog 
+                      ? (isRecognized 
+                          ? theme.palette.success.main 
+                          : theme.palette.error.main)
+                      : theme.palette.divider
+                  }`
+                }}
+              >
+                <Box sx={{ width: '100%' }}>
+                  <Typography 
+                    variant="body2" 
+                    color={lastRecog 
+                      ? (isRecognized ? 'success.dark' : 'error.dark') 
+                      : 'text.primary'}
+                    fontWeight={isRecognized ? 'bold' : 'normal'}
+                    component="div"
+                    sx={{ mb: 0.5 }}
+                  >
+                    {student.nombre || student.codigo}
+                  </Typography>
+                  <Box 
+                    component="div" 
+                    sx={{ 
+                      display: 'flex', 
+                      justifyContent: 'space-between',
+                      typography: 'caption',
+                      color: 'text.secondary'
+                    }}
+                  >
+                    <span>{student.codigo} {student.carrera ? `· ${student.carrera}` : ''}</span>
+                    {lastRecog && (
+                      <span>
+                        {`${(lastRecog.confidence * 100).toFixed(1)}%`}
+                        {` · ${new Date(lastRecog.ts).toLocaleTimeString()}`}
+                      </span>
+                    )}
+                  </Box>
+                </Box>
               </ListItem>
-            )
+            );
           })}
-          {selected && students.length === 0 && <Typography variant="body2" color="text.secondary">Sin estudiantes</Typography>}
+          {selected && students.length === 0 && (
+            <Typography variant="body2" color="text.secondary">
+              Sin estudiantes matriculados en este curso
+            </Typography>
+          )}
         </List>
       </Paper>
 

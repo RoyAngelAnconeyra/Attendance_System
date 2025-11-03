@@ -1,8 +1,9 @@
 from pathlib import Path
-from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi import WebSocket, WebSocketDisconnect
+from typing import Optional, List, Dict, Any, Tuple, Set
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.exc import NoResultFound
 from ...deps import get_db, require_role
 from ...core.config import settings
 from ... import models
@@ -11,24 +12,71 @@ import cv2 as cv
 import numpy as np
 from mtcnn import MTCNN
 from keras_facenet import FaceNet as KFaceNet
-from pickle import load as pkl_load
+from pickle import load as pkl_load, dump as pkl_dump
 import pickle
 from datetime import datetime, date, timedelta
 try:
     from zoneinfo import ZoneInfo
-except Exception:  # pragma: no cover
-    ZoneInfo = None  # type: ignore
-from sklearn.svm import SVC
-from sklearn.preprocessing import LabelEncoder
+except ImportError:  # pragma: no cover
+    import pytz
+    ZoneInfo = pytz.timezone  # type: ignore
 import os
 import logging
+import faiss
+from sklearn.preprocessing import LabelEncoder
+import json
+import base64
+from PIL import Image, ImageDraw, ImageFont
 
 
 router = APIRouter()
 
-DATASET_DIR = Path("dataset")
-MODELS_DIR = Path("models")
+# Configurar el logger primero para asegurar que los mensajes se muestren
 logger = logging.getLogger(__name__)
+
+# Función para encontrar el directorio raíz del proyecto
+def find_project_root():
+    """
+    Busca el directorio raíz del proyecto (donde está el directorio 'backend')
+    """
+    current = Path(__file__).resolve()
+    # Subir hasta encontrar el directorio que contiene 'backend'
+    while current.parent != current:
+        if (current / 'backend').is_dir() and (current / 'frontend').is_dir():
+            return current
+        current = current.parent
+    return Path.cwd()  # Fallback al directorio actual
+
+# Obtener rutas absolutas
+PROJECT_ROOT = find_project_root()
+DATASET_DIR = PROJECT_ROOT / "dataset"
+MODELS_DIR = PROJECT_ROOT / "models"
+
+# Asegurarse de que los directorios existan
+DATASET_DIR.mkdir(exist_ok=True, parents=True)
+MODELS_DIR.mkdir(exist_ok=True, parents=True)
+
+# Log para depuración
+try:
+    logger.info(f"Directorio raíz del proyecto: {PROJECT_ROOT}")
+    logger.info(f"Ruta del dataset: {DATASET_DIR}")
+    logger.info(f"Ruta de modelos: {MODELS_DIR}")
+    logger.info(f"¿Existe el dataset?: {DATASET_DIR.exists()}")
+    logger.info(f"¿Existe el directorio de modelos?: {MODELS_DIR.exists()}")
+    
+    # Listar contenido del dataset para depuración
+    if DATASET_DIR.exists():
+        logger.info(f"Contenido del dataset: {[p.name for p in DATASET_DIR.iterdir() if p.is_dir()]}")
+        for subdir in DATASET_DIR.iterdir():
+            if subdir.is_dir():
+                logger.info(f"  {subdir.name}: {len(list(subdir.glob('*.*')))} archivos")
+    else:
+        logger.warning(f"El directorio del dataset no existe: {DATASET_DIR}")
+        
+except Exception as e:
+    logger.error(f"Error al configurar rutas: {str(e)}", exc_info=True)
+    raise
+
 
 def lima_now() -> datetime:
     try:
@@ -136,44 +184,118 @@ def capture_faces_for_student(
 
 
 def _load_classifier():
-    clf_path = MODELS_DIR / "face_svm.pkl"
-    le_path = MODELS_DIR / "label_encoder.pkl"
-    if not clf_path.exists() or not le_path.exists():
-        raise HTTPException(status_code=400, detail="Modelo no entrenado. Ejecuta /api/train primero.")
-    with open(clf_path, "rb") as f:
-        clf = pickle.load(f)
-    with open(le_path, "rb") as f:
-        le = pickle.load(f)
-    return clf, le
+    """
+    Carga el modelo FAISS y sus componentes necesarios.
+    
+    Returns:
+        dict: Diccionario con los componentes del modelo FAISS:
+            - type: "faiss"
+            - index: Índice FAISS cargado
+            - encoder: Codificador de etiquetas
+            - embeddings: Array con los embeddings de entrenamiento
+            - labels: Array con las etiquetas correspondientes a los embeddings
+            
+    Raises:
+        HTTPException: Si no se encuentra el modelo o hay un error al cargarlo
+    """
+    # Rutas a los archivos del modelo FAISS
+    faiss_index_path = MODELS_DIR / "face-recognition-faiss.index"
+    le_path = MODELS_DIR / "label-encoder-faiss.pkl"
+    embeddings_path = MODELS_DIR / "face-embeddings-faiss.npz"
+    
+    # Verificar que existan todos los archivos necesarios
+    missing_files = []
+    if not faiss_index_path.exists():
+        missing_files.append("face-recognition-faiss.index")
+    if not le_path.exists():
+        missing_files.append("label-encoder-faiss.pkl")
+    if not embeddings_path.exists():
+        missing_files.append("face-embeddings-faiss.npz")
+        
+    if missing_files:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Archivos del modelo FAISS no encontrados: {', '.join(missing_files)}. Ejecuta /api/train primero."
+        )
+    
+    try:
+        # Cargar el índice FAISS
+        logger.info("Cargando índice FAISS...")
+        index = faiss.read_index(str(faiss_index_path))
+        
+        # Cargar el codificador de etiquetas
+        logger.info("Cargando codificador de etiquetas...")
+        with open(le_path, "rb") as f:
+            le = pickle.load(f)
+            
+        # Cargar los embeddings y etiquetas para referencia
+        logger.info("Cargando embeddings y etiquetas...")
+        data = np.load(embeddings_path, allow_pickle=True)
+        
+        # Verificar que los datos estén en el formato correcto
+        if 'X' not in data or 'y' not in data:
+            raise ValueError("Los datos de embeddings no tienen el formato esperado (X, y)")
+            
+        logger.info(f"Modelo FAISS cargado correctamente con {len(data['y'])} muestras")
+        
+        return {
+            "type": "faiss",
+            "index": index,
+            "encoder": le,
+            "embeddings": data['X'],
+            "labels": data['y']
+        }
+        
+    except Exception as e:
+        error_msg = f"Error al cargar el modelo FAISS: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise HTTPException(
+            status_code=500, 
+            detail=error_msg
+        )
 
 
 def _mark_attendance(db: Session, codigo: str, course_id: int):
-    stu = db.query(models.Student).filter(models.Student.codigo == codigo).first()
-    if not stu:
-        return False
-    # Avoid duplicates same day/course (simple policy)
-    # Use Peru timezone for day boundaries (store as naive local time). Fallback to local if tzdata missing.
-    today_start = lima_now().replace(hour=0, minute=0, second=0, microsecond=0).replace(tzinfo=None)
-    exists = (
-        db.query(models.Attendance)
-        .filter(
-            models.Attendance.estudiante_id == stu.id,
-            models.Attendance.curso_id == course_id,
-            models.Attendance.fecha_hora >= today_start,
+    try:
+        # Buscar al estudiante por código
+        stu = db.query(models.Student).filter(models.Student.codigo == codigo).first()
+        if not stu:
+            logger.warning(f"Estudiante con código {codigo} no encontrado")
+            return False
+            
+        # Verificar si ya existe un registro de asistencia hoy
+        today_start = lima_now().replace(hour=0, minute=0, second=0, microsecond=0).replace(tzinfo=None)
+        exists = (
+            db.query(models.Attendance)
+            .filter(
+                models.Attendance.estudiante_id == stu.id,
+                models.Attendance.curso_id == course_id,
+                models.Attendance.fecha_hora >= today_start,
+            )
+            .first()
         )
-        .first()
-    )
-    if exists:
+        
+        if exists:
+            logger.info(f"El estudiante {codigo} ya tiene registro de asistencia hoy")
+            return False
+            
+        # Crear nuevo registro de asistencia
+        rec = models.Attendance(
+            estudiante_id=stu.id,
+            curso_id=course_id,
+            fecha_hora=lima_now().replace(tzinfo=None),
+            estado=models.AttendanceState.presente,
+        )
+        db.add(rec)
+        db.commit()
+        db.refresh(rec)
+        logger.info(f"Asistencia registrada para {codigo} en el curso {course_id}")
+        return True
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error al marcar asistencia para {codigo}: {str(e)}")
         return False
-    rec = models.Attendance(
-        estudiante_id=stu.id,
-        curso_id=course_id,
-        fecha_hora=lima_now().replace(tzinfo=None),
-        estado=models.AttendanceState.presente,
-    )
-    db.add(rec)
-    db.commit()
-    return True
 
 
 def _finalize_attendance_for_session(db: Session, course_id: int, recognized_cuis: set[str]):
@@ -230,77 +352,192 @@ def recognize_start(
     db: Session = Depends(get_db),
     user: models.User = Depends(require_role(models.UserRole.docente, models.UserRole.admin)),
 ):
-    # Validate course ownership for docente
+    """
+    Inicia el reconocimiento facial para el curso especificado.
+    Similar a main.py pero integrado con FastAPI.
+    """
+    # Validar curso
     course = db.get(models.Course, course_id)
     if not course:
         raise HTTPException(status_code=404, detail="Curso no encontrado")
     if user.rol == models.UserRole.docente and course.docente_id != user.id:
         raise HTTPException(status_code=403, detail="No autorizado para este curso")
 
-    # Load model
-    clf, le = _load_classifier()
+    # Cargar el modelo FAISS
+    model_info = _load_classifier()
+    if model_info["type"] != "faiss":
+        raise HTTPException(status_code=500, detail="Tipo de modelo no soportado")
+    
+    # Inicializar componentes
     embedder = KFaceNet()
     detector = MTCNN()
 
-    # Camera
+    # Configurar la cámara
     cap = cv.VideoCapture(int(settings.CAMERA_INDEX))
     if not cap.isOpened():
         raise HTTPException(status_code=500, detail="No se pudo abrir la cámara")
-    cap.set(cv.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv.CAP_PROP_FRAME_HEIGHT, 480)
+    
+    # Configuración de la cámara
+    cap.set(cv.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv.CAP_PROP_FRAME_HEIGHT, 720)
 
     recognized: list[dict] = []
     recognized_cuis: set[str] = set()
     end_time = datetime.now() + timedelta(minutes=duration_minutes)
+    
     try:
+        frame_counter = 0
         while datetime.now() < end_time:
             ok, frame = cap.read()
             if not ok or frame is None:
                 continue
+                
+            # Hacer una copia del frame para mostrar
+            display_frame = frame.copy()
+            
+            # Convertir a RGB para MTCNN
             rgb = cv.cvtColor(frame, cv.COLOR_BGR2RGB)
+            
+            # Procesar solo 1 de cada 3 frames para mejorar el rendimiento
+            frame_counter += 1
+            if frame_counter % 3 != 0:
+                continue
+            
+            # Detectar rostros
             try:
                 detections = detector.detect_faces(rgb)
-            except Exception:
-                detections = []
-            if not detections:
-                continue
-
-            det = max(detections, key=lambda d: d.get('confidence', 0))
-            x, y, w, h = det.get('box', [0, 0, 0, 0])
-            x, y = abs(x), abs(y)
-            if w <= 0 or h <= 0:
-                continue
-
-            face = rgb[y:y+h, x:x+w]
-            if face.size == 0:
-                continue
-            face = cv.resize(face, (160, 160))
-
-            # embedding
-            # KFaceNet expects RGB images normalized internally
-            embed = embedder.embeddings([face])[0]
-
-            # predict
-            try:
-                probs = clf.predict_proba([embed])[0]
-                idx = int(np.argmax(probs))
-                conf = float(probs[idx])
-                label = le.classes_[idx]
             except Exception as e:
-                logger.exception("Classifier predict_proba failed, fallback to predict: %s", e)
-                # fallback to decision_function if no predict_proba
-                pred = clf.predict([embed])[0]
-                label = pred
-                conf = 1.0
+                logger.error(f"Error en detección de rostros: {e}")
+                detections = []
+                
+            # Procesar cada detección
+            for det in detections:
+                x, y, w, h = det.get('box', [0, 0, 0, 0])
+                x, y = abs(x), abs(y)
+                if w <= 0 or h <= 0:
+                    continue
 
-            if conf >= settings.CONFIDENCE_THRESHOLD:
-                recognized_cuis.add(str(label))
-                recognized.append({"codigo": label, "confidence": conf})
+                face = rgb[y:y+h, x:x+w]
+                if face.size == 0:
+                    continue
+                    
+                # Redimensionar y extraer embedding
+                face_resized = cv.resize(face, (160, 160))
+                emb = embedder.embeddings([face_resized])[0].astype('float32')
+                
+                # Búsqueda de vecinos más cercanos con FAISS
+                faiss.normalize_L2(emb.reshape(1, -1))
+                k = 5  # Número de vecinos a buscar
+                distances, indices = model_info["index"].search(emb.reshape(1, -1), k)
+                
+                # Obtener etiquetas de los vecinos
+                neighbor_labels = model_info["labels"][indices[0]]
+                
+                # Contar ocurrencias de cada etiqueta
+                unique_labels, counts = np.unique(neighbor_labels, return_counts=True)
+                
+                if len(counts) > 0:  # Si hay etiquetas
+                    most_common_idx = np.argmax(counts)
+                    label = str(unique_labels[most_common_idx])
+                    
+                    # Calcular confianza basada en la mayoría de votos
+                    conf = counts[most_common_idx] / k
+                    
+                    # Ajustar confianza basada en la distancia
+                    if distances[0][0] > 0:  # Evitar división por cero
+                        distance_confidence = 1.0 / (1.0 + distances[0][0])
+                        conf = 0.7 * conf + 0.3 * distance_confidence
+                    
+                    # Registrar reconocimiento si supera el umbral
+                    if conf >= settings.CONFIDENCE_THRESHOLD:
+                        recognized_cuis.add(label)
+                        recognized.append({"codigo": label, "confidence": float(conf)})
+                        
+                        # Marcar asistencia
+                        _mark_attendance(db, label, course_id)
+                
+            # Mostrar el frame con las detecciones (solo si no estamos en modo headless)
+            if not os.environ.get('OPENCV_HEADLESS'):
+                for det in detections:
+                    x, y, w, h = det.get('box', [0, 0, 0, 0])
+                    x, y = abs(x), abs(y)
+                    if w > 0 and h > 0:
+                        # Buscar la etiqueta y confianza para esta detección
+                        face = rgb[y:y+h, x:x+w]
+                        if face.size == 0:
+                            continue
+                            
+                        face_resized = cv.resize(face, (160, 160))
+                        emb = embedder.embeddings([face_resized])[0].astype('float32')
+                        
+                        # Búsqueda de vecinos más cercanos con FAISS
+                        faiss.normalize_L2(emb.reshape(1, -1))
+                        k = 5
+                        distances, indices = model_info["index"].search(emb.reshape(1, -1), k)
+                        neighbor_labels = model_info["labels"][indices[0]]
+                        unique_labels, counts = np.unique(neighbor_labels, return_counts=True)
+                        
+                        if len(counts) > 0:
+                            most_common_idx = np.argmax(counts)
+                            label = str(unique_labels[most_common_idx])
+                            conf = counts[most_common_idx] / k
+                            
+                            # Ajustar confianza basada en la distancia
+                            if distances[0][0] > 0:
+                                distance_confidence = 1.0 / (1.0 + distances[0][0])
+                                conf = 0.7 * conf + 0.3 * distance_confidence
+                            
+                            # Depuración: Mostrar valores de confianza
+                            print(f"\n--- Debug Reconocimiento ---")
+                            print(f"Confianza calculada: {conf:.2f}")
+                            print(f"Umbral configurado: {settings.CONFIDENCE_THRESHOLD}")
+                            print(f"Supera el umbral: {conf >= settings.CONFIDENCE_THRESHOLD}")
+                            print(f"Label: {label}")
+                            
+                            # Determinar color basado en la confianza
+                            if conf >= settings.CONFIDENCE_THRESHOLD:
+                                color = (0, 255, 0)  # Verde para reconocido
+                                print("Color: Verde (Reconocido)")
+                            else:
+                                color = (0, 0, 255)  # Rojo para no reconocido
+                                print("Color: Rojo (No reconocido)")
+                            
+                            # Dibujar rectángulo
+                            cv.rectangle(display_frame, (x, y), (x+w, y+h), color, 2)
+                            
+                            # Mostrar etiqueta y confianza
+                            label_text = f"{label} ({conf*100:.1f}%)"
+                            cv.putText(display_frame, label_text, (x, y-10), 
+                                     cv.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                                     
+                            # Forzar actualización de la ventana
+                            cv.imshow('Reconocimiento Facial', display_frame)
+                            cv.waitKey(1)
+                        else:
+                            # Si no se reconoce la cara
+                            cv.rectangle(display_frame, (x, y), (x+w, y+h), (0, 0, 255), 2)
+                            cv.putText(display_frame, "Desconocido", (x, y-10), 
+                                     cv.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    
+                # Mostrar el frame con todas las detecciones
+                cv.imshow('Reconocimiento Facial', display_frame)
+                
+                # Salir si se presiona 'q'
+                if cv.waitKey(1) & 0xFF == ord('q'):
+                    break
+    
+    except Exception as e:
+        logger.error(f"Error durante el reconocimiento: {e}")
+        raise HTTPException(status_code=500, detail=f"Error durante el reconocimiento: {str(e)}")
+    
     finally:
         cap.release()
+        if not os.environ.get('OPENCV_HEADLESS'):
+            cv.destroyAllWindows()
 
-    # Replace today's attendance with this session results
+    # Finalizar la sesión de reconocimiento
     summary = _finalize_attendance_for_session(db, course_id, recognized_cuis)
+    
     return {
         "message": "Reconocimiento finalizado",
         "recognized": recognized,
@@ -357,106 +594,201 @@ def train_model_endpoint(
     if not X:
         raise HTTPException(status_code=400, detail="Dataset vacío. Capture rostros antes de entrenar")
 
+    # Convertir a numpy array
+    X_np = np.array(X).astype('float32')
+    
+    # Normalizar los embeddings para mejorar el rendimiento de L2
+    faiss.normalize_L2(X_np)
+    
+    # Crear y entrenar el índice FAISS
+    d = X_np.shape[1]  # Dimensión de los embeddings
+    index = faiss.IndexFlatL2(d)  # Usar distancia L2 (Euclidiana)
+    index.add(X_np)  # Añadir todos los vectores al índice
+    
+    # Codificar etiquetas
     le = LabelEncoder()
     y_enc = le.fit_transform(y)
-    clf = SVC(kernel="linear", probability=True)
-    clf.fit(X, y_enc)
-
-    with open(MODELS_DIR / "face_svm.pkl", "wb") as f:
-        pickle.dump(clf, f)
-    with open(MODELS_DIR / "label_encoder.pkl", "wb") as f:
+    
+    # Guardar el modelo FAISS
+    faiss.write_index(index, str(MODELS_DIR / "face-recognition-faiss.index"))
+    with open(MODELS_DIR / "label-encoder-faiss.pkl", "wb") as f:
         pickle.dump(le, f)
-
-    return {"message": "Modelo entrenado", "classes": list(le.classes_), "samples": len(X)}
+    
+    # Guardar los embeddings y etiquetas para referencia
+    np.savez_compressed(
+        str(MODELS_DIR / "face-embeddings-faiss.npz"), 
+        X=X_np, 
+        y=np.array(y)
+    )
+    
+    # Calcular precisión aproximada en entrenamiento (opcional)
+    _, indices = index.search(X_np, 5)  # Buscar 5 vecinos más cercanos
+    correct = 0
+    for i, neighbors in enumerate(indices):
+        neighbor_labels = y_enc[neighbors]
+        if y_enc[i] in neighbor_labels:
+            correct += 1
+    accuracy = correct / len(y_enc)
+    
+    return {
+        "message": "Modelo FAISS entrenado exitosamente",
+        "samples": len(X_np),
+        "dimensions": d,
+        "training_accuracy": accuracy,
+        "index_size": index.ntotal
+    }
 
 
 @router.get("/model/status")
 def model_status():
-    clf_path = MODELS_DIR / "face_svm.pkl"
-    le_path = MODELS_DIR / "label_encoder.pkl"
-    trained = clf_path.exists() and le_path.exists()
-    classes: list[str] = []
-    mtime: Optional[float] = None
-    if trained:
-        try:
-            with open(le_path, "rb") as f:
-                le = pickle.load(f)
-                classes = list(getattr(le, 'classes_', []))
-            mtime = max(clf_path.stat().st_mtime, le_path.stat().st_mtime)
-        except Exception as e:
-            logger.exception("Error leyendo modelo: %s", e)
-    warnings = []
-    if settings.JWT_SECRET == "CHANGE_ME_SUPER_SECRET":
-        warnings.append("JWT_SECRET utiliza el valor por defecto. Cambiar en backend/.env")
-    return {
-        "trained": trained,
-        "classes": classes,
-        "modified_at": mtime,
+    # Verificar si existe el modelo FAISS
+    faiss_index_path = MODELS_DIR / "face-recognition-faiss.index"
+    le_path = MODELS_DIR / "label-encoder-faiss.pkl"
+    embeddings_path = MODELS_DIR / "face-embeddings-faiss.npz"
+    
+    faiss_trained = all([faiss_index_path.exists(), le_path.exists(), embeddings_path.exists()])
+    
+    # Verificar si existe el modelo SVM antiguo (para compatibilidad)
+    svm_path = MODELS_DIR / "face_svm.pkl"
+    old_le_path = MODELS_DIR / "label_encoder.pkl"
+    svm_trained = svm_path.exists() and old_le_path.exists()
+    
+    model_info = {
+        "model_type": "faiss" if faiss_trained else "svm" if svm_trained else None,
+        "trained": faiss_trained or svm_trained,
+        "classes": [],
+        "last_trained": None,
         "threshold": settings.CONFIDENCE_THRESHOLD,
-        "warnings": warnings,
+        "samples": 0,
+        "dimensions": 0,
+        "warnings": []
     }
 
 
 @router.websocket("/recognize/ws")
 async def recognize_ws(websocket: WebSocket, course_id: int):
     await websocket.accept()
+    
+    # Cargar el modelo FAISS
     try:
-        clf, le = _load_classifier()
+        model_info = _load_classifier()
+        if model_info["type"] != "faiss":
+            raise HTTPException(status_code=500, detail="Tipo de modelo no soportado")
     except HTTPException as e:
         await websocket.send_json({"error": e.detail})
         await websocket.close()
         return
-
+    
+    # Inicializar componentes comunes
     embedder = KFaceNet()
     detector = MTCNN()
+    
+    # Configurar la cámara
     cap = cv.VideoCapture(int(settings.CAMERA_INDEX))
     if not cap.isOpened():
         await websocket.send_json({"error": "No se pudo abrir la cámara"})
         await websocket.close()
         return
-    cap.set(cv.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv.CAP_PROP_FRAME_HEIGHT, 480)
-
+    
+    # Configurar resolución de la cámara
+    cap.set(cv.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv.CAP_PROP_FRAME_HEIGHT, 720)
+    
+    # Contador de frames para no procesar todos los frames
+    frame_counter = 0
+    
     try:
         while True:
             try:
+                # Recibir mensaje del cliente (podría usarse para control)
                 await websocket.receive_text()
             except WebSocketDisconnect:
                 break
+                
+            # Leer frame de la cámara
             ok, frame = cap.read()
             if not ok or frame is None:
                 await websocket.send_json({"event": "frame_error"})
                 continue
+                
+            # Convertir a RGB para MTCNN y FaceNet
             rgb = cv.cvtColor(frame, cv.COLOR_BGR2RGB)
+            
+            # Detectar rostros (usar solo cada 3 frames para mejorar rendimiento)
+            frame_counter += 1
+            if frame_counter % 3 != 0:
+                continue
+                
             try:
                 detections = detector.detect_faces(rgb)
-            except Exception:
+            except Exception as e:
+                logger.error(f"Error en detección de rostros: {e}")
                 detections = []
+                
             if not detections:
                 await websocket.send_json({"event": "no_face"})
                 continue
+                
+            # Tomar el rostro con mayor confianza
             det = max(detections, key=lambda d: d.get('confidence', 0))
             x, y, w, h = det.get('box', [0, 0, 0, 0])
             x, y = abs(x), abs(y)
+            
             if w <= 0 or h <= 0:
                 await websocket.send_json({"event": "invalid_box"})
                 continue
+                
+            # Extraer el rostro
             face = rgb[y:y+h, x:x+w]
             if face.size == 0:
                 await websocket.send_json({"event": "empty_crop"})
                 continue
+                
+            # Redimensionar y extraer embedding
             face = cv.resize(face, (160, 160))
-            emb = embedder.embeddings([face])[0]
+            emb = embedder.embeddings([face])[0].astype('float32')
+            
             try:
-                probs = clf.predict_proba([emb])[0]
-                idx = int(np.argmax(probs))
-                conf = float(probs[idx])
-                label = le.classes_[idx]
-            except Exception:
-                pred = clf.predict([emb])[0]
-                label = pred
-                conf = 1.0
-            await websocket.send_json({"event": "prediction", "codigo": label, "confidence": conf})
+                # Usar FAISS para la búsqueda de vecinos más cercanos
+                faiss.normalize_L2(emb.reshape(1, -1))  # Normalizar el embedding
+                
+                # Buscar los 5 vecinos más cercanos
+                k = 5
+                distances, indices = model_info["index"].search(emb.reshape(1, -1), k)
+                
+                # Obtener las etiquetas de los vecinos
+                neighbor_labels = model_info["labels"][indices[0]]
+                
+                # Contar ocurrencias de cada etiqueta
+                unique_labels, counts = np.unique(neighbor_labels, return_counts=True)
+                
+                # Obtener la etiqueta más común
+                most_common_idx = np.argmax(counts)
+                label = unique_labels[most_common_idx]
+                
+                # Calcular confianza basada en la mayoría de votos
+                conf = counts[most_common_idx] / k
+                
+                # Ajustar la confianza basada en la distancia
+                # Cuanto menor sea la distancia, mayor será la confianza
+                if distances[0][0] > 0:  # Evitar división por cero
+                    distance_confidence = 1.0 / (1.0 + distances[0][0])
+                    conf = 0.7 * conf + 0.3 * distance_confidence
+                
+                # Enviar la predicción al cliente
+                await websocket.send_json({
+                    "event": "prediction", 
+                    "codigo": str(label), 
+                    "confidence": float(conf),
+                    "model_type": "faiss"
+                })
+                
+            except Exception as e:
+                logger.error(f"Error en la predicción: {e}")
+                await websocket.send_json({
+                    "event": "prediction_error",
+                    "error": str(e)
+                })
     finally:
         cap.release()
         await websocket.close()

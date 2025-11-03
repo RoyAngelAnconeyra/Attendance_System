@@ -34,7 +34,7 @@ function Shell({ children }: { children: React.ReactNode }) {
       </header>
       <main style={{ flex: 1 }}>{children}</main>
       <footer style={{ borderTop: '1px solid #eee', padding: 16, textAlign: 'center', color: '#666' }}>
-        Reconocimiento facial (MTCNN + FaceNet + SVM)
+        Reconocimiento facial (MTCNN + FaceNet + k-NN + FAISS)
       </footer>
     </div>
   )

@@ -5,7 +5,7 @@ export default function Landing() {
   return (
     <div style={{ maxWidth: 960, margin: '0 auto', padding: '48px 20px' }}>
       <h1 style={{ fontSize: 32, marginBottom: 8 }}>Sistema de Asistencia Universitaria</h1>
-      <p style={{ color: '#555', marginBottom: 24 }}>Reconocimiento facial en tiempo real con MTCNN + FaceNet + SVM</p>
+      <p style={{ color: '#555', marginBottom: 24 }}>Reconocimiento facial en tiempo real con MTCNN + FaceNet + k-NN + FAISS</p>
 
       <div style={{ display: 'flex', gap: 16, marginBottom: 40 }}>
         <Link to="/student" style={{ padding: '14px 18px', border: '1px solid #ddd', borderRadius: 8, textDecoration: 'none' }}>Soy estudiante</Link>

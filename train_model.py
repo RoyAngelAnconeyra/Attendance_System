@@ -2,8 +2,8 @@ import cv2 as cv
 import os
 import numpy as np
 import pickle
+import faiss
 from sklearn.preprocessing import LabelEncoder
-from sklearn.svm import SVC
 from keras_facenet import FaceNet
 from mtcnn import MTCNN
 
@@ -116,35 +116,54 @@ class FaceTrainer:
         print(f"✅ {len(embeddings)} embeddings extraídos")
         return np.array(embeddings)
 
-    def train_svm(self, embeddings, labels):
-        """Entrena el clasificador SVM"""
-        print("\n=== Entrenando modelo SVM ===")
+    def train_faiss_knn(self, embeddings, labels, k=5):
+        """Entrena el clasificador k-NN usando FAISS"""
+        print("\n=== Entrenando modelo k-NN (FAISS) ===")
 
         encoder = LabelEncoder()
         labels_encoded = encoder.fit_transform(labels)
+        labels_encoded = np.array(labels_encoded).astype('int64')
 
-        model = SVC(kernel='linear', probability=True)
-        model.fit(embeddings, labels_encoded)
+        # Normalizar los embeddings para mejorar el rendimiento de L2
+        embeddings = embeddings.astype('float32')
+        faiss.normalize_L2(embeddings)
+        
+        # Crear y entrenar el índice FAISS
+        d = embeddings.shape[1]  # Dimensión de los embeddings
+        index = faiss.IndexFlatL2(d)  # Usar distancia L2 (Euclidiana)
+        index.add(embeddings)  # Añadir todos los vectores al índice
 
-        # Calcular precisión en entrenamiento
-        train_acc = model.score(embeddings, labels_encoded)
-        print(f"✅ Modelo entrenado - Precisión: {train_acc * 100:.2f}%")
+        # Validación simple: predecir sobre los mismos datos de entrenamiento
+        _, indices = index.search(embeddings, k)
+        preds = []
 
-        return model, encoder
+        for neighbors in indices:
+            neighbor_labels = labels_encoded[neighbors]
+            counts = np.bincount(neighbor_labels)
+            preds.append(np.argmax(counts))
 
-    def save_model(self, embeddings, labels, model):
-        """Guarda el modelo y embeddings"""
-        print("\n=== Guardando modelo ===")
+        preds = np.array(preds)
+        acc = np.mean(preds == labels_encoded)
+        print(f"✅ Precisión aproximada en entrenamiento: {acc*100:.2f}%")
 
-        # Guardar embeddings
-        np.savez_compressed('face-embeddings-done-for-classes.npz',
-                           embeddings, np.array(labels))
-        print("✓ Embeddings guardados: face-embeddings-done-for-classes.npz")
+        return index, encoder
 
-        # Guardar modelo SVM
-        with open('face-recognition-model.pkl', 'wb') as f:
-            pickle.dump(model, f)
-        print("✓ Modelo guardado: face-recognition-model.pkl")
+    def save_model(self, embeddings, labels, index, encoder):
+        """Guarda el índice FAISS, los embeddings y el codificador de etiquetas"""
+        print("\n=== Guardando modelo FAISS ===")
+
+        # Guardar embeddings y etiquetas
+        np.savez_compressed('face-embeddings-faiss.npz', embeddings=embeddings, labels=np.array(labels))
+        print("✓ Embeddings guardados: face-embeddings-faiss.npz")
+
+        # Guardar índice FAISS
+        faiss.write_index(index, 'face-recognition-faiss.index')
+        print("✓ Índice FAISS guardado: face-recognition-faiss.index")
+
+        # Guardar encoder
+        with open('label-encoder-faiss.pkl', 'wb') as f:
+            pickle.dump(encoder, f)
+        print("✓ Codificador guardado: label-encoder-faiss.pkl")
 
         print("\n✅ ¡Entrenamiento completado!")
         print("\nPróximo paso: Ejecuta 'python main.py' para probar el reconocimiento")
@@ -158,11 +177,11 @@ class FaceTrainer:
         # Extraer embeddings
         embeddings = self.extract_embeddings()
 
-        # Entrenar modelo
-        model, encoder = self.train_svm(embeddings, self.y)
+        # Entrenar modelo k-NN con FAISS
+        index, encoder = self.train_faiss_knn(embeddings, self.y, k=5)
 
         # Guardar modelo
-        self.save_model(embeddings, self.y, model)
+        self.save_model(embeddings, self.y, index, encoder)
 
         # Mostrar resumen
         print("\n" + "="*50)
@@ -170,7 +189,8 @@ class FaceTrainer:
         print("="*50)
         print(f"Personas entrenadas: {list(set(self.y))}")
         print(f"Total de imágenes: {len(self.X)}")
-        print(f"Embeddings por imagen: 512 dimensiones")
+        print(f"Embeddings por imagen: {embeddings.shape[1]} dimensiones")
+        print("Tipo de índice: FAISS (k-NN con L2)")
         print("="*50)
 
 

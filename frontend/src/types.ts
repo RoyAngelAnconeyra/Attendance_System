@@ -12,10 +12,16 @@ export type Student = {
   id: number
   user_id: number
   codigo: string
+  nombre?: string
   carrera?: string
   uses_glasses: boolean
   uses_cap: boolean
   uses_mask: boolean
+  lastRecognition?: {
+    ts: number
+    confidence: number
+    recognized: boolean
+  }
 }
 
 export type Attendance = {
