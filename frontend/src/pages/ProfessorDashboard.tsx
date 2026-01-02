@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import api from '../api/client'
+import DeleteIcon from '@mui/icons-material/Delete';
 import { Course, Student, Attendance } from '../types'
-import { Box, Paper, Typography, List, ListItem, ListItemButton, ListItemText, Divider, Button, Alert, TextField } from '@mui/material'
+import { Box, Paper, Typography, List, ListItem, ListItemButton, ListItemText, Divider, Button, Alert, TextField, IconButton } from '@mui/material'
 
 export default function ProfessorDashboard() {
   const [courses, setCourses] = useState<Course[]>([])
@@ -34,20 +35,33 @@ export default function ProfessorDashboard() {
     run()
   }, [])
 
-  const trainModel = async () => {
-    setTrainMsg(null)
-    setErr(null)
-    setTrainLoading(true)
-    try {
-      const res = await api.post('/train')
-      const classes = (res.data?.classes || []).join(', ')
-      setTrainMsg(`Modelo entrenado. Clases: ${classes} · Muestras: ${res.data?.samples}`)
-    } catch (e: any) {
-      setErr(e?.response?.data?.detail || 'No se pudo entrenar el modelo')
-    } finally {
-      setTrainLoading(false)
+  const trainModel = async (courseId: number, courseName: string) => {
+    if (!courseId || !courseName) {
+      console.error("Falta courseId o courseName");
+      return;
     }
-  }
+
+    setTrainLoading(true);
+    setTrainMsg(null);
+    setErr(null);
+
+    try {
+      const response = await api.post('/train', null, {
+        params: { 
+          course_id: courseId, 
+          course_name: courseName 
+        }
+      });
+      setTrainMsg(response.data?.message || 'Modelo entrenado exitosamente');
+      return response.data;
+    } catch (error) {
+      console.error('Error al entrenar el modelo:', error);
+      setErr(error?.response?.data?.detail || 'Error al entrenar el modelo');
+      throw error;
+    } finally {
+      setTrainLoading(false);
+    }
+  };
 
   const wsUrlForCourse = (courseId: number) => {
     const base = (import.meta.env.VITE_API_URL || 'http://localhost:8000/api') as string
@@ -71,33 +85,10 @@ export default function ProfessorDashboard() {
         const data = JSON.parse(ev.data)
         const ts = Date.now()
         
-        // Actualizar la lista de reconocimientos
+        // SOLO actualizar la lista de reconocimientos en tiempo real
+        // NO actualizar lastRecognition de estudiantes (eso solo lo hace Iniciar Reconocimiento)
         setLive(prev => {
           const newLive = [{ ...data, ts }, ...prev].slice(0, 20)
-          
-          // Si es un reconocimiento exitoso, actualizar la lista de estudiantes
-          if (data.event === 'prediction' && data.codigo) {
-            const studentCui = data.codigo
-            const confidence = data.confidence || 0
-            const isRecognized = confidence >= 0.6
-            
-            setStudents(prevStudents => 
-              prevStudents.map(student => {
-                if (student.codigo === studentCui) {
-                  return {
-                    ...student,
-                    lastRecognition: {
-                      ts,
-                      confidence,
-                      recognized: isRecognized
-                    }
-                  }
-                }
-                return student
-              })
-            )
-          }
-          
           return newLive
         })
       } catch (e) {
@@ -118,6 +109,8 @@ export default function ProfessorDashboard() {
     if (ws) {
       try { ws.close() } catch {}
     }
+    // Limpiar el estado de reconocimiento en vivo al desconectar
+    setLive([])
   }
 
   useEffect(() => {
@@ -155,7 +148,7 @@ export default function ProfessorDashboard() {
     setErr(null);
     
     try {
-      // 1. Iniciar el reconocimiento
+      // 1. Iniciar el reconocimiento oficial (marca asistencia)
       const res = await api.get('/recognize/start', { 
         params: { 
           course_id: selected.id, 
@@ -163,51 +156,56 @@ export default function ProfessorDashboard() {
         } 
       });
       
-      setMsg(res.data?.message || 'Sesión de reconocimiento completada');
+      // El backend devuelve información detallada del reconocimiento
+      const recognized = res.data?.recognized || [];
+      const summary = res.data?.session_summary || {};
       
-      // 2. Esperar a que termine el reconocimiento
-      setTimeout(async () => {
-        try {
-          const today = new Date();
-          const on_date = today.toISOString().slice(0, 10);
-          
-          // Obtener la lista actualizada de estudiantes
-          const studentsRes = await api.get('/students', { 
-            params: { course_id: selected.id } 
-          });
-          
-          // Obtener la asistencia actualizada
-          const attendanceRes = await api.get('/attendance', { 
-            params: { 
-              course_id: selected.id, 
-              on_date 
-            } 
-          });
-          
-          // Actualizar el estado de asistencia
-          setAttendance(attendanceRes.data || []);
-          
-          // Actualizar el estado de los estudiantes con la información de reconocimiento
-          if (studentsRes.data?.length) {
-            setStudents(studentsRes.data.map((student: Student) => {
-              const studentAttendance = attendanceRes.data?.find(
-                (a: Attendance) => a.estudiante_id === student.id
-              );
-              
-              return {
-                ...student,
-                lastRecognition: studentAttendance ? {
-                  ts: new Date().getTime(),
-                  confidence: 1,
-                  recognized: studentAttendance.estado === 'presente'
-                } : undefined
-              };
-            }));
-          }
-        } catch (e) {
-          console.error('Error al actualizar la asistencia:', e);
+      setMsg(
+        `Reconocimiento completado. ` +
+        `Presentes: ${summary.present || 0}, ` +
+        `Ausentes: ${summary.absent || 0}`
+      );
+      
+      // 2. Actualizar inmediatamente la asistencia y estudiantes
+      const today = new Date();
+      const on_date = today.toISOString().slice(0, 10);
+      
+      try {
+        // Obtener la asistencia actualizada del día
+        const attendanceRes = await api.get('/attendance', { 
+          params: { 
+            course_id: selected.id, 
+            on_date 
+          } 
+        });
+        
+        // Obtener la lista de estudiantes
+        const studentsRes = await api.get('/students', { 
+          params: { course_id: selected.id } 
+        });
+        
+        // Actualizar el estado de asistencia
+        setAttendance(attendanceRes.data || []);
+        
+        // Actualizar estudiantes con información de asistencia
+        if (studentsRes.data?.length) {
+          setStudents(studentsRes.data.map((student: Student) => {
+            const studentAttendance = attendanceRes.data?.find(
+              (a: Attendance) => a.estudiante_id === student.id
+            );
+            
+            // NO usar lastRecognition aquí, solo usar attendance
+            // lastRecognition es solo para el WebSocket (que ya no lo usa)
+            return {
+              ...student,
+              // Limpiar lastRecognition si existe (solo debe venir de asistencia oficial)
+              lastRecognition: undefined
+            };
+          }));
         }
-      }, 2000);
+      } catch (e) {
+        console.error('Error al actualizar la asistencia:', e);
+      }
     } catch (e: any) {
       setErr(e?.response?.data?.detail || 'No se pudo iniciar reconocimiento');
     } finally {
@@ -245,6 +243,28 @@ export default function ProfessorDashboard() {
     }
   }
 
+  const removeStudent = async (studentId: number) => {
+    if (!selected) return;
+    
+    if (!window.confirm('¿Estás seguro de eliminar este estudiante del curso?')) {
+      return;
+    }
+
+    try {
+      await api.delete(`/courses/${selected.id}/students/${studentId}`);
+      
+      // Actualizar la lista de estudiantes
+      const res = await api.get('/students', { 
+        params: { course_id: selected.id } 
+      });
+      setStudents(res.data || []);
+      
+      setMsg('Estudiante eliminado correctamente');
+    } catch (e: any) {
+      setErr(e?.response?.data?.detail || 'Error al eliminar el estudiante');
+    }
+  };
+
   return (
     <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 2, p: 2 }}>
       <Paper sx={{ p: 2 }}>
@@ -260,35 +280,40 @@ export default function ProfessorDashboard() {
       </Paper>
 
       <Paper sx={{ p: 2 }}>
-        <Typography variant="h6" mb={1}>Reconocimiento en vivo (stream)</Typography>
+        <Typography variant="h6" mb={1}>Reconocimiento en vivo (stream) - Solo visualización</Typography>
+        <Typography variant="caption" color="text.secondary" sx={{ mb: 1, display: 'block' }}>
+          Este panel muestra reconocimiento en tiempo real sin marcar asistencia. 
+          Use "Iniciar Reconocimiento" para el proceso oficial.
+        </Typography>
         <List dense>
           {live.map(item => {
             const confidence = item.confidence ?? 0;
-            const isRecognized = confidence >= 0.6;
-            const color = isRecognized ? 'success.main' : 'error.main';
+            const hasCode = item.codigo && item.codigo !== 'Desconocido';
             
             return (
               <ListItem 
                 key={item.ts} 
                 sx={{ 
-                  bgcolor: item.codigo ? (isRecognized ? 'success.light' : 'error.light') : 'background.paper',
+                  bgcolor: hasCode ? 'info.light' : 'background.paper',
                   mb: 0.5,
-                  borderRadius: 1
+                  borderRadius: 1,
+                  borderLeft: hasCode ? '3px solid' : 'none',
+                  borderColor: hasCode ? 'info.main' : 'transparent'
                 }}
               >
                 <ListItemText 
                   primary={
                     <Typography 
                       variant="body2" 
-                      color={color}
-                      fontWeight={isRecognized ? 'bold' : 'normal'}
+                      color={hasCode ? 'info.dark' : 'text.secondary'}
+                      fontWeight={hasCode ? 'medium' : 'normal'}
                     >
                       {item.codigo || 'Desconocido'}
                     </Typography>
                   }
                   secondary={
                     <Typography variant="caption" color="text.secondary">
-                      {`${(confidence * 100).toFixed(1)}% · ${new Date(item.ts).toLocaleTimeString()}`}
+                      {`${(confidence * 100).toFixed(1)}% confianza · ${new Date(item.ts).toLocaleTimeString()}`}
                     </Typography>
                   }
                 />
@@ -297,7 +322,7 @@ export default function ProfessorDashboard() {
           })}
           {live.length === 0 && (
             <Typography variant="body2" color="text.secondary" sx={{ p: 2, textAlign: 'center' }}>
-              Sin eventos de reconocimiento
+              {wsConnected ? 'Esperando detecciones...' : 'Conecte el WebSocket para ver reconocimiento en tiempo real'}
             </Typography>
           )}
         </List>
@@ -310,14 +335,20 @@ export default function ProfessorDashboard() {
         {msg && <Alert severity="success" sx={{ mb: 1 }}>{msg}</Alert>}
         {trainMsg && <Alert severity="info" sx={{ mb: 1 }}>{trainMsg}</Alert>}
         <Box sx={{ display: 'flex', gap: 1, mb: 2, flexWrap: 'wrap' }}>
-          <Button variant="outlined" onClick={trainModel} disabled={trainLoading}>{trainLoading ? 'Entrenando...' : 'Entrenar modelo'}</Button>
+          <Button variant="outlined" onClick={() => {
+            if (selected) {
+              trainModel(selected.id, selected.nombre);
+            } else {
+              setErr('Por favor selecciona un curso primero');
+            }
+          }} disabled={trainLoading || !selected}>{trainLoading ? 'Entrenando...' : 'Entrenar modelo'}</Button>
           <Button variant="outlined" onClick={connectWS} disabled={!selected || wsConnected}>Conectar WS</Button>
           <Button variant="outlined" onClick={disconnectWS} disabled={!wsConnected}>Desconectar WS</Button>
           <Typography variant="body2" color="text.secondary">{wsConnected ? 'WS conectado' : 'WS desconectado'}</Typography>
         </Box>
         <Box sx={{ display: 'flex', gap: 1, mb: 2 }}>
           <Button variant="contained" disabled={!selected || loading} onClick={startRecognition}>
-            {loading ? 'Iniciando...' : 'Iniciar reconocimiento (demo)'}
+            {loading ? 'Iniciando...' : 'Iniciar Reconocimiento'}
           </Button>
         </Box>
         {selected && (
@@ -329,58 +360,119 @@ export default function ProfessorDashboard() {
         <Typography variant="subtitle1" gutterBottom>Estudiantes</Typography>
         <List dense>
           {students.map(student => {
-            const lastRecog = student.lastRecognition;
-            const isRecognized = lastRecog?.recognized;
-            const bgColor = lastRecog 
-              ? (isRecognized ? 'success.light' : 'error.light') 
-              : 'background.paper';
+            // Buscar asistencia del estudiante para hoy (SOLO de Iniciar Reconocimiento)
+            const studentAttendance = attendance.find(a => a.estudiante_id === student.id);
+            const confidence = studentAttendance?.confidence || 0; // Porcentaje de coincidencia
+            const meetsThreshold = confidence >= 70; // Umbral del 70%
             
+            // Determinar estado basado en el umbral
+            const isPresent = studentAttendance && meetsThreshold;
+            const isAbsent = studentAttendance && !meetsThreshold;
+            
+            // Los colores verde/rojo SOLO se muestran si hay registro de asistencia oficial
+            // (no del WebSocket de prueba)
+
             return (
               <ListItem 
                 key={student.id}
                 sx={{
-                  bgcolor: bgColor,
+                  bgcolor: isPresent 
+                    ? 'success.light' 
+                    : (isAbsent 
+                        ? 'error.light' 
+                        : 'background.paper'),
                   mb: 0.5,
                   borderRadius: 1,
                   transition: 'background-color 0.3s ease',
                   borderLeft: theme => `4px solid ${
-                    lastRecog 
-                      ? (isRecognized 
-                          ? theme.palette.success.main 
-                          : theme.palette.error.main)
-                      : theme.palette.divider
+                    isPresent 
+                      ? theme.palette.success.main 
+                      : (isAbsent
+                          ? theme.palette.error.main
+                          : theme.palette.divider)
                   }`
                 }}
               >
-                <Box sx={{ width: '100%' }}>
-                  <Typography 
-                    variant="body2" 
-                    color={lastRecog 
-                      ? (isRecognized ? 'success.dark' : 'error.dark') 
-                      : 'text.primary'}
-                    fontWeight={isRecognized ? 'bold' : 'normal'}
-                    component="div"
-                    sx={{ mb: 0.5 }}
-                  >
-                    {student.nombre || student.codigo}
-                  </Typography>
-                  <Box 
-                    component="div" 
-                    sx={{ 
-                      display: 'flex', 
-                      justifyContent: 'space-between',
-                      typography: 'caption',
-                      color: 'text.secondary'
-                    }}
-                  >
-                    <span>{student.codigo} {student.carrera ? `· ${student.carrera}` : ''}</span>
-                    {lastRecog && (
-                      <span>
-                        {`${(lastRecog.confidence * 100).toFixed(1)}%`}
-                        {` · ${new Date(lastRecog.ts).toLocaleTimeString()}`}
-                      </span>
-                    )}
+                <Box sx={{ 
+                  width: '100%', 
+                  display: 'flex', 
+                  justifyContent: 'space-between', 
+                  alignItems: 'center' 
+                }}>
+                  <Box sx={{ flex: 1 }}>
+                    <Typography 
+                      variant="body2" 
+                      color={isPresent 
+                        ? 'success.dark' 
+                        : (isAbsent
+                            ? 'error.dark'
+                            : 'text.primary')}
+                      fontWeight={(isPresent || isAbsent) ? 'bold' : 'normal'}
+                      component="div"
+                      sx={{ mb: 0.5 }}
+                    >
+                      {student.nombre || student.codigo}
+                    </Typography>
+                    <Box 
+                      component="div" 
+                      sx={{ 
+                        display: 'flex', 
+                        flexDirection: 'column',
+                        gap: 0.5,
+                        typography: 'caption',
+                        color: 'text.secondary'
+                      }}
+                    >
+                      <span>{student.codigo} {student.carrera ? `· ${student.carrera}` : ''}</span>
+                      {studentAttendance ? (
+                        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.25 }}>
+                          <span style={{ 
+                            fontWeight: 'bold',
+                            color: isPresent ? '#2e7d32' : '#d32f2f'
+                          }}>
+                            {isPresent 
+                              ? `🟩 Presente (${Math.round(confidence)}%)` 
+                              : `🟥 Ausente (${Math.round(confidence)}%)`}
+                          </span>
+                          {studentAttendance.fecha_hora && isPresent && (
+                            <span>
+                              Fecha: {new Date(studentAttendance.fecha_hora).toLocaleDateString('es-ES', {
+                                year: 'numeric',
+                                month: '2-digit',
+                                day: '2-digit'
+                              })}
+                              {' · '}
+                              Hora: {new Date(studentAttendance.fecha_hora).toLocaleTimeString('es-ES', {
+                                hour: '2-digit',
+                                minute: '2-digit',
+                                second: '2-digit'
+                              })}
+                            </span>
+                          )}
+                          {isAbsent && (
+                            <span style={{ fontStyle: 'italic' }}>
+                              No asistió
+                            </span>
+                          )}
+                        </Box>
+                      ) : (
+                        <span style={{ fontStyle: 'italic', color: 'text.disabled' }}>
+                          Sin registro de asistencia
+                        </span>
+                      )}
+                    </Box>
                   </Box>
+                  <IconButton 
+                    color="error" 
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      removeStudent(student.id);
+                    }}
+                    title="Eliminar del curso"
+                    size="small"
+                  >
+                    <DeleteIcon fontSize="small" />
+                  </IconButton>
                 </Box>
               </ListItem>
             );

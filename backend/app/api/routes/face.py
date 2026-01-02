@@ -183,9 +183,13 @@ def capture_faces_for_student(
     }
 
 
-def _load_classifier():
+def _load_classifier(course_id: Optional[int] = None):
     """
     Carga el modelo FAISS y sus componentes necesarios.
+    
+    Args:
+        course_id: ID del curso. Si se proporciona, carga el modelo específico del curso.
+                   Si es None, intenta cargar el modelo global (compatibilidad hacia atrás).
     
     Returns:
         dict: Diccionario con los componentes del modelo FAISS:
@@ -194,51 +198,68 @@ def _load_classifier():
             - encoder: Codificador de etiquetas
             - embeddings: Array con los embeddings de entrenamiento
             - labels: Array con las etiquetas correspondientes a los embeddings
+            - course_id: ID del curso (si se proporcionó)
             
     Raises:
         HTTPException: Si no se encuentra el modelo o hay un error al cargarlo
     """
-    # Rutas a los archivos del modelo FAISS
-    faiss_index_path = MODELS_DIR / "face-recognition-faiss.index"
-    le_path = MODELS_DIR / "label-encoder-faiss.pkl"
-    embeddings_path = MODELS_DIR / "face-embeddings-faiss.npz"
+    # Determinar la ruta del modelo según si hay course_id
+    if course_id is not None:
+        course_models_dir = MODELS_DIR / "courses" / f"curso_{course_id}"
+        faiss_index_path = course_models_dir / "face-recognition-faiss.index"
+        le_path = course_models_dir / "label-encoder-faiss.pkl"
+        embeddings_path = course_models_dir / "face-embeddings-faiss.npz"
+        model_type = f"curso_{course_id}"
+    else:
+        # Compatibilidad: modelo global
+        faiss_index_path = MODELS_DIR / "face-recognition-faiss.index"
+        le_path = MODELS_DIR / "label-encoder-faiss.pkl"
+        embeddings_path = MODELS_DIR / "face-embeddings-faiss.npz"
+        model_type = "global"
     
     # Verificar que existan todos los archivos necesarios
     missing_files = []
     if not faiss_index_path.exists():
-        missing_files.append("face-recognition-faiss.index")
+        missing_files.append(str(faiss_index_path.name))
     if not le_path.exists():
-        missing_files.append("label-encoder-faiss.pkl")
+        missing_files.append(str(le_path.name))
     if not embeddings_path.exists():
-        missing_files.append("face-embeddings-faiss.npz")
+        missing_files.append(str(embeddings_path.name))
         
     if missing_files:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Archivos del modelo FAISS no encontrados: {', '.join(missing_files)}. Ejecuta /api/train primero."
-        )
+        if course_id is not None:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Modelo no encontrado para el curso {course_id}. Archivos faltantes: {', '.join(missing_files)}. "
+                       f"Ejecuta /api/train?course_id={course_id} primero."
+            )
+        else:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Archivos del modelo FAISS no encontrados: {', '.join(missing_files)}. Ejecuta /api/train primero."
+            )
     
     try:
         # Cargar el índice FAISS
-        logger.info("Cargando índice FAISS...")
+        logger.info(f"Cargando índice FAISS ({model_type})...")
         index = faiss.read_index(str(faiss_index_path))
         
         # Cargar el codificador de etiquetas
-        logger.info("Cargando codificador de etiquetas...")
+        logger.info(f"Cargando codificador de etiquetas ({model_type})...")
         with open(le_path, "rb") as f:
             le = pickle.load(f)
             
         # Cargar los embeddings y etiquetas para referencia
-        logger.info("Cargando embeddings y etiquetas...")
+        logger.info(f"Cargando embeddings y etiquetas ({model_type})...")
         data = np.load(embeddings_path, allow_pickle=True)
         
         # Verificar que los datos estén en el formato correcto
         if 'X' not in data or 'y' not in data:
             raise ValueError("Los datos de embeddings no tienen el formato esperado (X, y)")
             
-        logger.info(f"Modelo FAISS cargado correctamente con {len(data['y'])} muestras")
+        logger.info(f"Modelo FAISS ({model_type}) cargado correctamente con {len(data['y'])} muestras")
         
-        return {
+        result = {
             "type": "faiss",
             "index": index,
             "encoder": le,
@@ -246,8 +267,13 @@ def _load_classifier():
             "labels": data['y']
         }
         
+        if course_id is not None:
+            result["course_id"] = course_id
+            
+        return result
+        
     except Exception as e:
-        error_msg = f"Error al cargar el modelo FAISS: {str(e)}"
+        error_msg = f"Error al cargar el modelo FAISS ({model_type}): {str(e)}"
         logger.error(error_msg, exc_info=True)
         raise HTTPException(
             status_code=500, 
@@ -363,8 +389,23 @@ def recognize_start(
     if user.rol == models.UserRole.docente and course.docente_id != user.id:
         raise HTTPException(status_code=403, detail="No autorizado para este curso")
 
-    # Cargar el modelo FAISS
-    model_info = _load_classifier()
+    # Obtener estudiantes matriculados en el curso
+    enrolled_students = (
+        db.query(models.Student)
+        .join(models.Enrollment, models.Enrollment.estudiante_id == models.Student.id)
+        .filter(models.Enrollment.curso_id == course_id)
+        .all()
+    )
+    
+    if not enrolled_students:
+        raise HTTPException(status_code=400, detail="No hay estudiantes matriculados en este curso")
+    
+    # Obtener códigos (CUI) de estudiantes matriculados
+    enrolled_cuis = {stu.codigo for stu in enrolled_students}
+    logger.info(f"Estudiantes matriculados en el curso {course_id}: {sorted(enrolled_cuis)}")
+
+    # Cargar el modelo FAISS específico del curso
+    model_info = _load_classifier(course_id=course_id)
     if model_info["type"] != "faiss":
         raise HTTPException(status_code=500, detail="Tipo de modelo no soportado")
     
@@ -448,13 +489,20 @@ def recognize_start(
                         distance_confidence = 1.0 / (1.0 + distances[0][0])
                         conf = 0.7 * conf + 0.3 * distance_confidence
                     
-                    # Registrar reconocimiento si supera el umbral
-                    if conf >= settings.CONFIDENCE_THRESHOLD:
+                    # Verificar si el estudiante reconocido pertenece al curso
+                    is_enrolled = label in enrolled_cuis
+                    
+                    # Registrar reconocimiento si supera el umbral Y pertenece al curso
+                    if conf >= settings.CONFIDENCE_THRESHOLD and is_enrolled:
                         recognized_cuis.add(label)
                         recognized.append({"codigo": label, "confidence": float(conf)})
                         
                         # Marcar asistencia
                         _mark_attendance(db, label, course_id)
+                    elif conf >= settings.CONFIDENCE_THRESHOLD and not is_enrolled:
+                        # Reconocido pero no pertenece al curso - marcar como desconocido
+                        logger.warning(f"Estudiante {label} reconocido pero no está matriculado en el curso {course_id}")
+                        recognized.append({"codigo": "Desconocido", "confidence": float(conf), "original_label": label})
                 
             # Mostrar el frame con las detecciones (solo si no estamos en modo headless)
             if not os.environ.get('OPENCV_HEADLESS'):
@@ -487,26 +535,25 @@ def recognize_start(
                                 distance_confidence = 1.0 / (1.0 + distances[0][0])
                                 conf = 0.7 * conf + 0.3 * distance_confidence
                             
-                            # Depuración: Mostrar valores de confianza
-                            print(f"\n--- Debug Reconocimiento ---")
-                            print(f"Confianza calculada: {conf:.2f}")
-                            print(f"Umbral configurado: {settings.CONFIDENCE_THRESHOLD}")
-                            print(f"Supera el umbral: {conf >= settings.CONFIDENCE_THRESHOLD}")
-                            print(f"Label: {label}")
+                            # Verificar si el estudiante reconocido pertenece al curso
+                            is_enrolled = label in enrolled_cuis
                             
-                            # Determinar color basado en la confianza
-                            if conf >= settings.CONFIDENCE_THRESHOLD:
-                                color = (0, 255, 0)  # Verde para reconocido
-                                print("Color: Verde (Reconocido)")
+                            # Determinar color y etiqueta basado en confianza y pertenencia al curso
+                            if conf >= settings.CONFIDENCE_THRESHOLD and is_enrolled:
+                                color = (0, 255, 0)  # Verde para reconocido y matriculado
+                                display_label = label
+                            elif conf >= settings.CONFIDENCE_THRESHOLD and not is_enrolled:
+                                color = (255, 165, 0)  # Naranja para reconocido pero no matriculado
+                                display_label = "Desconocido"
                             else:
                                 color = (0, 0, 255)  # Rojo para no reconocido
-                                print("Color: Rojo (No reconocido)")
+                                display_label = "Desconocido"
                             
                             # Dibujar rectángulo
                             cv.rectangle(display_frame, (x, y), (x+w, y+h), color, 2)
                             
                             # Mostrar etiqueta y confianza
-                            label_text = f"{label} ({conf*100:.1f}%)"
+                            label_text = f"{display_label} ({conf*100:.1f}%)"
                             cv.putText(display_frame, label_text, (x, y-10), 
                                      cv.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
                                      
@@ -538,31 +585,113 @@ def recognize_start(
     # Finalizar la sesión de reconocimiento
     summary = _finalize_attendance_for_session(db, course_id, recognized_cuis)
     
+    # Obtener información detallada de asistencia para cada estudiante
+    today_start = lima_now().replace(hour=0, minute=0, second=0, microsecond=0).replace(tzinfo=None)
+    attendance_records = (
+        db.query(models.Attendance)
+        .filter(
+            models.Attendance.curso_id == course_id,
+            models.Attendance.fecha_hora >= today_start,
+        )
+        .all()
+    )
+    
+    # Crear lista detallada de asistencia por estudiante
+    attendance_details = []
+    enrolled_students_dict = {stu.id: stu for stu in enrolled_students}
+    
+    for att in attendance_records:
+        student = enrolled_students_dict.get(att.estudiante_id)
+        if student:
+            attendance_details.append({
+                "estudiante_id": att.estudiante_id,
+                "codigo": student.codigo,
+                "nombre": f"{student.user.nombres} {student.user.apellidos}" if student.user else student.codigo,
+                "estado": att.estado.value,
+                "fecha_hora": att.fecha_hora.isoformat() if att.fecha_hora else None,
+            })
+    
+    # Identificar estudiantes ausentes (matriculados pero sin asistencia)
+    present_student_ids = {att.estudiante_id for att in attendance_records if att.estado == models.AttendanceState.presente}
+    for stu in enrolled_students:
+        if stu.id not in present_student_ids:
+            attendance_details.append({
+                "estudiante_id": stu.id,
+                "codigo": stu.codigo,
+                "nombre": f"{stu.user.nombres} {stu.user.apellidos}" if stu.user else stu.codigo,
+                "estado": "ausente",
+                "fecha_hora": None,
+            })
+    
     return {
         "message": "Reconocimiento finalizado",
         "recognized": recognized,
         "course_id": course_id,
+        "course_name": course.nombre,
         "session_summary": summary,
+        "attendance_details": attendance_details,
+        "recognized_count": len(recognized_cuis),
+        "total_students": len(enrolled_students),
     }
 
 @router.post("/train")
 def train_model_endpoint(
+    course_id: int,
+    course_name: Optional[str] = None,
+    db: Session = Depends(get_db),
     user: models.User = Depends(require_role(models.UserRole.docente, models.UserRole.admin)),
 ):
+    """
+    Entrena un modelo de reconocimiento facial específico para un curso.
+    Solo incluye estudiantes matriculados en ese curso.
+    """
+    # Validar curso
+    course = db.get(models.Course, course_id)
+    if not course:
+        raise HTTPException(status_code=404, detail="Curso no encontrado")
+    
+    # Verificar permisos
+    if user.rol == models.UserRole.docente and course.docente_id != user.id:
+        raise HTTPException(status_code=403, detail="No autorizado para este curso")
+    
+    # Obtener estudiantes matriculados en el curso
+    enrolled_students = (
+        db.query(models.Student)
+        .join(models.Enrollment, models.Enrollment.estudiante_id == models.Student.id)
+        .filter(models.Enrollment.curso_id == course_id)
+        .all()
+    )
+    
+    if not enrolled_students:
+        raise HTTPException(status_code=400, detail="No hay estudiantes matriculados en este curso")
+    
+    # Obtener códigos (CUI) de estudiantes matriculados
+    enrolled_cuis = {stu.codigo for stu in enrolled_students}
+    
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     if not DATASET_DIR.exists():
         raise HTTPException(status_code=400, detail="No hay dataset para entrenar")
+
+    # Crear directorio específico para el curso
+    course_models_dir = MODELS_DIR / "courses" / f"curso_{course_id}"
+    course_models_dir.mkdir(parents=True, exist_ok=True)
 
     embedder = KFaceNet()
     X: list[np.ndarray] = []
     y: list[str] = []
 
     IMAGE_EXTS = (".jpg", ".jpeg", ".png")
-    # Recorre dataset/{CUI}/**/*.jpg y cachea embeddings en archivos .npy al lado de cada imagen
+    # Recorre dataset/{CUI}/**/*.jpg solo para estudiantes del curso
     for person_dir in sorted(DATASET_DIR.iterdir()):
         if not person_dir.is_dir():
             continue
-        label = person_dir.name
+        label = person_dir.name  # El nombre del directorio es el CUI
+        
+        # Filtrar solo estudiantes matriculados en el curso
+        if label not in enrolled_cuis:
+            logger.info(f"Omitiendo {label} - no está matriculado en el curso {course_id}")
+            continue
+        
         for root, _dirs, files in os.walk(person_dir):
             for fname in files:
                 if not fname.lower().endswith(IMAGE_EXTS):
@@ -592,7 +721,11 @@ def train_model_endpoint(
                 y.append(label)
 
     if not X:
-        raise HTTPException(status_code=400, detail="Dataset vacío. Capture rostros antes de entrenar")
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Dataset vacío para el curso. Capture rostros de los estudiantes matriculados antes de entrenar. "
+                   f"Estudiantes esperados: {', '.join(sorted(enrolled_cuis))}"
+        )
 
     # Convertir a numpy array
     X_np = np.array(X).astype('float32')
@@ -609,14 +742,14 @@ def train_model_endpoint(
     le = LabelEncoder()
     y_enc = le.fit_transform(y)
     
-    # Guardar el modelo FAISS
-    faiss.write_index(index, str(MODELS_DIR / "face-recognition-faiss.index"))
-    with open(MODELS_DIR / "label-encoder-faiss.pkl", "wb") as f:
+    # Guardar el modelo FAISS en el directorio del curso
+    faiss.write_index(index, str(course_models_dir / "face-recognition-faiss.index"))
+    with open(course_models_dir / "label-encoder-faiss.pkl", "wb") as f:
         pickle.dump(le, f)
     
     # Guardar los embeddings y etiquetas para referencia
     np.savez_compressed(
-        str(MODELS_DIR / "face-embeddings-faiss.npz"), 
+        str(course_models_dir / "face-embeddings-faiss.npz"), 
         X=X_np, 
         y=np.array(y)
     )
@@ -630,12 +763,18 @@ def train_model_endpoint(
             correct += 1
     accuracy = correct / len(y_enc)
     
+    unique_students = len(set(y))
+    
     return {
-        "message": "Modelo FAISS entrenado exitosamente",
+        "message": f"Modelo FAISS entrenado exitosamente para el curso '{course.nombre}'",
+        "course_id": course_id,
+        "course_name": course.nombre,
         "samples": len(X_np),
+        "students_count": unique_students,
         "dimensions": d,
         "training_accuracy": accuracy,
-        "index_size": index.ntotal
+        "index_size": index.ntotal,
+        "model_path": str(course_models_dir)
     }
 
 
@@ -669,9 +808,37 @@ def model_status():
 async def recognize_ws(websocket: WebSocket, course_id: int):
     await websocket.accept()
     
-    # Cargar el modelo FAISS
+    # Validar curso y obtener estudiantes matriculados
+    from ...db.session import SessionLocal
+    db_local = SessionLocal()
     try:
-        model_info = _load_classifier()
+        course = db_local.get(models.Course, course_id)
+        if not course:
+            await websocket.send_json({"error": "Curso no encontrado"})
+            await websocket.close()
+            return
+        
+        # Obtener estudiantes matriculados en el curso
+        enrolled_students = (
+            db_local.query(models.Student)
+            .join(models.Enrollment, models.Enrollment.estudiante_id == models.Student.id)
+            .filter(models.Enrollment.curso_id == course_id)
+            .all()
+        )
+        
+        enrolled_cuis = {stu.codigo for stu in enrolled_students}
+        logger.info(f"WebSocket: Estudiantes matriculados en el curso {course_id}: {sorted(enrolled_cuis)}")
+    except Exception as e:
+        logger.error(f"Error al validar curso en WebSocket: {e}")
+        await websocket.send_json({"error": f"Error al validar curso: {str(e)}"})
+        await websocket.close()
+        return
+    finally:
+        db_local.close()
+    
+    # Cargar el modelo FAISS específico del curso
+    try:
+        model_info = _load_classifier(course_id=course_id)
         if model_info["type"] != "faiss":
             raise HTTPException(status_code=500, detail="Tipo de modelo no soportado")
     except HTTPException as e:
@@ -764,7 +931,7 @@ async def recognize_ws(websocket: WebSocket, course_id: int):
                 
                 # Obtener la etiqueta más común
                 most_common_idx = np.argmax(counts)
-                label = unique_labels[most_common_idx]
+                label = str(unique_labels[most_common_idx])
                 
                 # Calcular confianza basada en la mayoría de votos
                 conf = counts[most_common_idx] / k
@@ -775,12 +942,28 @@ async def recognize_ws(websocket: WebSocket, course_id: int):
                     distance_confidence = 1.0 / (1.0 + distances[0][0])
                     conf = 0.7 * conf + 0.3 * distance_confidence
                 
+                # Verificar si el estudiante reconocido pertenece al curso
+                is_enrolled = label in enrolled_cuis
+                
+                # Determinar el código a enviar
+                if conf >= settings.CONFIDENCE_THRESHOLD and is_enrolled:
+                    # Reconocido y matriculado - enviar código del estudiante
+                    final_codigo = label
+                elif conf >= settings.CONFIDENCE_THRESHOLD and not is_enrolled:
+                    # Reconocido pero no matriculado - marcar como desconocido
+                    final_codigo = "Desconocido"
+                    logger.warning(f"WebSocket: Estudiante {label} reconocido pero no está matriculado en el curso {course_id}")
+                else:
+                    # No reconocido con suficiente confianza
+                    final_codigo = "Desconocido"
+                
                 # Enviar la predicción al cliente
                 await websocket.send_json({
                     "event": "prediction", 
-                    "codigo": str(label), 
+                    "codigo": final_codigo, 
                     "confidence": float(conf),
-                    "model_type": "faiss"
+                    "model_type": "faiss",
+                    "is_enrolled": is_enrolled if conf >= settings.CONFIDENCE_THRESHOLD else False
                 })
                 
             except Exception as e:
