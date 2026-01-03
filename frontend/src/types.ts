@@ -8,12 +8,25 @@ export type Course = {
   horario?: string
 }
 
+export interface User {
+  id: number;
+  nombres: string;
+  apellidos: string;
+  email: string;
+  rol: string;
+}
+
 export type Student = {
   id: number
   user_id: number
   codigo: string
   nombre?: string
   carrera?: string
+  user?: {
+    nombres: string;
+    apellidos: string;
+    email: string;
+  };
   uses_glasses: boolean
   uses_cap: boolean
   uses_mask: boolean

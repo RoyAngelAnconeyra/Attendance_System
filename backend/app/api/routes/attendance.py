@@ -2,6 +2,7 @@ from typing import List, Optional
 from datetime import datetime, date
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
+from sqlalchemy.orm import joinedload
 from ...deps import get_db, get_current_user, require_role
 from ... import models, schemas
 

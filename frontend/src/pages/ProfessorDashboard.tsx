@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import api from '../api/client'
 import DeleteIcon from '@mui/icons-material/Delete';
-import { Course, Student, Attendance } from '../types'
+import { Course, Student, Attendance, User } from '../types'
 import { Box, Paper, Typography, List, ListItem, ListItemButton, ListItemText, Divider, Button, Alert, TextField, IconButton } from '@mui/material'
 
 export default function ProfessorDashboard() {
@@ -82,19 +82,29 @@ export default function ProfessorDashboard() {
     }
     sock.onmessage = (ev) => {
       try {
-        const data = JSON.parse(ev.data)
-        const ts = Date.now()
-        
-        // SOLO actualizar la lista de reconocimientos en tiempo real
-        // NO actualizar lastRecognition de estudiantes (eso solo lo hace Iniciar Reconocimiento)
+        const data = JSON.parse(ev.data);
+        const ts = Date.now();
+        if (data.type === 'recognition_completed') {
+          // Actualizar el estado de asistencia
+          const today = new Date().toISOString().slice(0, 10);
+          api.get('/attendance', { 
+            params: { 
+              course_id: selected?.id, 
+              on_date: today 
+            } 
+          }).then(res => {
+            setAttendance(res.data || []);
+          });
+        }
+        // Mantener la lógica existente para actualizaciones en tiempo real
         setLive(prev => {
-          const newLive = [{ ...data, ts }, ...prev].slice(0, 20)
-          return newLive
-        })
+          const newLive = [{ ...data, ts }, ...prev].slice(0, 20);
+          return newLive;
+        });
       } catch (e) {
-        console.error('Error procesando mensaje WebSocket:', e)
+        console.error('Error procesando mensaje WebSocket:', e);
       }
-    }
+    };
     sock.onclose = () => {
       setWsConnected(false)
       setWs(null)
@@ -280,11 +290,7 @@ export default function ProfessorDashboard() {
       </Paper>
 
       <Paper sx={{ p: 2 }}>
-        <Typography variant="h6" mb={1}>Reconocimiento en vivo (stream) - Solo visualización</Typography>
-        <Typography variant="caption" color="text.secondary" sx={{ mb: 1, display: 'block' }}>
-          Este panel muestra reconocimiento en tiempo real sin marcar asistencia. 
-          Use "Iniciar Reconocimiento" para el proceso oficial.
-        </Typography>
+        <Typography variant="h6" mb={1}>Reconocimiento en vivo</Typography>
         <List dense>
           {live.map(item => {
             const confidence = item.confidence ?? 0;
@@ -362,119 +368,61 @@ export default function ProfessorDashboard() {
           {students.map(student => {
             // Buscar asistencia del estudiante para hoy (SOLO de Iniciar Reconocimiento)
             const studentAttendance = attendance.find(a => a.estudiante_id === student.id);
-            const confidence = studentAttendance?.confidence || 0; // Porcentaje de coincidencia
-            const meetsThreshold = confidence >= 70; // Umbral del 70%
-            
-            // Determinar estado basado en el umbral
-            const isPresent = studentAttendance && meetsThreshold;
-            const isAbsent = studentAttendance && !meetsThreshold;
+            const isPresent = studentAttendance?.estado === 'presente';
             
             // Los colores verde/rojo SOLO se muestran si hay registro de asistencia oficial
             // (no del WebSocket de prueba)
+            const studentData = studentAttendance?.student || student;
+            const userName = studentData.user 
+              ? `${studentData.user.nombres}`.trim()
+              : 'Estudiante sin nombre';
 
             return (
-              <ListItem 
-                key={student.id}
-                sx={{
-                  bgcolor: isPresent 
-                    ? 'success.light' 
-                    : (isAbsent 
-                        ? 'error.light' 
-                        : 'background.paper'),
-                  mb: 0.5,
-                  borderRadius: 1,
-                  transition: 'background-color 0.3s ease',
-                  borderLeft: theme => `4px solid ${
-                    isPresent 
-                      ? theme.palette.success.main 
-                      : (isAbsent
-                          ? theme.palette.error.main
-                          : theme.palette.divider)
-                  }`
+              <div 
+                key={student.id} 
+                className="student-card"
+                style={{ 
+                  border: `2px solid ${isPresent ? '#2e7d32' : '#d32f2f'}`,
+                  backgroundColor: isPresent ? 'rgba(46, 125, 50, 0.1)' : 'rgba(211, 47, 47, 0.1)',
+                  borderRadius: '8px',
+                  padding: '12px',
+                  marginBottom: '8px',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center'
                 }}
               >
-                <Box sx={{ 
-                  width: '100%', 
-                  display: 'flex', 
-                  justifyContent: 'space-between', 
-                  alignItems: 'center' 
-                }}>
-                  <Box sx={{ flex: 1 }}>
-                    <Typography 
-                      variant="body2" 
-                      color={isPresent 
-                        ? 'success.dark' 
-                        : (isAbsent
-                            ? 'error.dark'
-                            : 'text.primary')}
-                      fontWeight={(isPresent || isAbsent) ? 'bold' : 'normal'}
-                      component="div"
-                      sx={{ mb: 0.5 }}
-                    >
-                      {student.nombre || student.codigo}
-                    </Typography>
-                    <Box 
-                      component="div" 
-                      sx={{ 
-                        display: 'flex', 
-                        flexDirection: 'column',
-                        gap: 0.5,
-                        typography: 'caption',
-                        color: 'text.secondary'
-                      }}
-                    >
-                      <span>{student.codigo} {student.carrera ? `· ${student.carrera}` : ''}</span>
-                      {studentAttendance ? (
-                        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.25 }}>
-                          <span style={{ 
-                            fontWeight: 'bold',
-                            color: isPresent ? '#2e7d32' : '#d32f2f'
-                          }}>
-                            {isPresent 
-                              ? `🟩 Presente (${Math.round(confidence)}%)` 
-                              : `🟥 Ausente (${Math.round(confidence)}%)`}
-                          </span>
-                          {studentAttendance.fecha_hora && isPresent && (
-                            <span>
-                              Fecha: {new Date(studentAttendance.fecha_hora).toLocaleDateString('es-ES', {
-                                year: 'numeric',
-                                month: '2-digit',
-                                day: '2-digit'
-                              })}
-                              {' · '}
-                              Hora: {new Date(studentAttendance.fecha_hora).toLocaleTimeString('es-ES', {
-                                hour: '2-digit',
-                                minute: '2-digit',
-                                second: '2-digit'
-                              })}
-                            </span>
-                          )}
-                          {isAbsent && (
-                            <span style={{ fontStyle: 'italic' }}>
-                              No asistió
-                            </span>
-                          )}
-                        </Box>
-                      ) : (
-                        <span style={{ fontStyle: 'italic', color: 'text.disabled' }}>
-                          Sin registro de asistencia
-                        </span>
-                      )}
-                    </Box>
-                  </Box>
-                  <IconButton 
-                    color="error" 
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      removeStudent(student.id);
-                    }}
-                    title="Eliminar del curso"
-                    size="small"
-                  >
-                    <DeleteIcon fontSize="small" />
-                  </IconButton>
-                </Box>
-              </ListItem>
+                <div>
+                  <div style={{ fontWeight: 'bold', color: '#000' }}>
+                    {student.codigo} - {userName}
+                  </div>
+                  <div style={{ fontSize: '0.85rem', color: '#555' }}>
+                    {student.carrera}
+                  </div>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ 
+                    color: '#000',
+                    fontWeight: 'bold',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px'
+                  }}>
+                    {isPresent ? 'Presente' : 'Ausente'}
+                  </div>
+                  {studentAttendance?.fecha_hora && (
+                    <div style={{ fontSize: '0.8rem', color: '#666' }}>
+                      {new Date(studentAttendance.fecha_hora).toLocaleString('es-ES', {
+                        day: '2-digit',
+                        month: '2-digit',
+                        year: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit'
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
             );
           })}
           {selected && students.length === 0 && (

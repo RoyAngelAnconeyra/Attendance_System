@@ -17,6 +17,8 @@ class UserBase(BaseModel):
     nombres: str
     apellidos: str
     rol: UserRole
+    class Config:
+        orm_mode = True
 
 class UserCreate(UserBase):
     password: str
@@ -26,6 +28,19 @@ class UserOut(UserBase):
 
     class Config:
         from_attributes = True
+
+class StudentBase(BaseModel):
+    codigo: str
+    carrera: Optional[str] = None
+    
+class StudentResponse(BaseModel):
+    id: int
+    codigo: str
+    carrera: Optional[str] = None
+    user_id: int
+    user: Optional[UserBase] = None
+    class Config:
+        orm_mode = True
 
 class StudentCreate(BaseModel):
     codigo: str
@@ -94,6 +109,9 @@ class AttendanceOut(BaseModel):
     curso_id: int
     estado: AttendanceState
     fecha_hora: Optional[datetime] = None
+    student: StudentResponse
+    class Config:
+        orm_mode = True
 
     class Config:
         from_attributes = True

@@ -282,93 +282,63 @@ def _load_classifier(course_id: Optional[int] = None):
 
 
 def _mark_attendance(db: Session, codigo: str, course_id: int):
-    try:
-        # Buscar al estudiante por código
-        stu = db.query(models.Student).filter(models.Student.codigo == codigo).first()
-        if not stu:
-            logger.warning(f"Estudiante con código {codigo} no encontrado")
-            return False
-            
-        # Verificar si ya existe un registro de asistencia hoy
-        today_start = lima_now().replace(hour=0, minute=0, second=0, microsecond=0).replace(tzinfo=None)
-        exists = (
-            db.query(models.Attendance)
-            .filter(
-                models.Attendance.estudiante_id == stu.id,
-                models.Attendance.curso_id == course_id,
-                models.Attendance.fecha_hora >= today_start,
-            )
-            .first()
-        )
-        
-        if exists:
-            logger.info(f"El estudiante {codigo} ya tiene registro de asistencia hoy")
-            return False
-            
+    """Marca la asistencia de un estudiante si supera el umbral de confianza"""
+    # Obtener el estudiante
+    student = db.query(models.Student).filter(models.Student.codigo == codigo).first()
+    if not student:
+        logger.warning(f"Estudiante con código {codigo} no encontrado")
+        return
+    # Verificar si ya existe un registro de asistencia hoy
+    today = datetime.utcnow().date()
+    existing = db.query(models.Attendance).filter(
+        models.Attendance.estudiante_id == student.id,
+        models.Attendance.curso_id == course_id,
+        models.Attendance.fecha_hora >= today,
+        models.Attendance.fecha_hora < today + timedelta(days=1)
+    ).first()
+    if not existing:
         # Crear nuevo registro de asistencia
-        rec = models.Attendance(
-            estudiante_id=stu.id,
+        attendance = models.Attendance(
+            estudiante_id=student.id,
             curso_id=course_id,
-            fecha_hora=lima_now().replace(tzinfo=None),
-            estado=models.AttendanceState.presente,
+            fecha_hora=datetime.utcnow(),
+            estado=models.AttendanceState.presente
         )
-        db.add(rec)
+        db.add(attendance)
         db.commit()
-        db.refresh(rec)
-        logger.info(f"Asistencia registrada para {codigo} en el curso {course_id}")
-        return True
-        
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Error al marcar asistencia para {codigo}: {str(e)}")
-        return False
+        logger.info(f"Marcando asistencia para {codigo} en curso {course_id}")
 
 
 def _finalize_attendance_for_session(db: Session, course_id: int, recognized_cuis: set[str]):
-    """
-    Replace today's attendance for the course with the latest session results:
-    - PRESENTE for recognized_cuis
-    - AUSENTE for enrolled students not recognized
-    """
-    now_local = lima_now().replace(tzinfo=None)
-    today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-
-    # Remove today's existing attendance for this course
-    (
-        db.query(models.Attendance)
-        .filter(
+    """Marca como ausentes a los estudiantes no reconocidos"""
+    # Obtener todos los estudiantes matriculados
+    enrolled_students = db.query(models.Student).join(
+        models.Enrollment,
+        models.Enrollment.estudiante_id == models.Student.id
+    ).filter(
+        models.Enrollment.curso_id == course_id
+    ).all()
+    today = datetime.utcnow().date()
+    
+    for student in enrolled_students:
+        # Verificar si el estudiante ya tiene registro de asistencia hoy
+        existing = db.query(models.Attendance).filter(
+            models.Attendance.estudiante_id == student.id,
             models.Attendance.curso_id == course_id,
-            models.Attendance.fecha_hora >= today_start,
-        )
-        .delete(synchronize_session=False)
-    )
-
-    # Get enrolled students and their CUI codes
-    enrolled = (
-        db.query(models.Student)
-        .join(models.Enrollment, models.Enrollment.estudiante_id == models.Student.id)
-        .filter(models.Enrollment.curso_id == course_id)
-        .all()
-    )
-
-    present = 0
-    absent = 0
-    for stu in enrolled:
-        estado = models.AttendanceState.presente if stu.codigo in recognized_cuis else models.AttendanceState.ausente
-        if estado == models.AttendanceState.presente:
-            present += 1
-        else:
-            absent += 1
-        db.add(
-            models.Attendance(
-                estudiante_id=stu.id,
+            models.Attendance.fecha_hora >= today,
+            models.Attendance.fecha_hora < today + timedelta(days=1)
+        ).first()
+        if not existing:
+            # Marcar como ausente
+            attendance = models.Attendance(
+                estudiante_id=student.id,
                 curso_id=course_id,
-                fecha_hora=now_local,
-                estado=estado,
+                fecha_hora=datetime.utcnow(),
+                estado=models.AttendanceState.ausente
             )
-        )
+            db.add(attendance)
+    
     db.commit()
-    return {"present": present, "absent": absent}
 
 
 @router.get("/recognize/start")

@@ -1,10 +1,35 @@
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
+from sqlalchemy.orm import joinedload
 from ...deps import get_db, require_role, get_current_user
 from ... import models, schemas
 
 router = APIRouter()
+
+@router.get("/", response_model=List[schemas.StudentResponse])
+def get_students(
+    course_id: int = None,
+    db: Session = Depends(get_db)
+):
+    query = (
+        db.query(models.Student)
+        .options(
+            joinedload(models.Student.user).load_only(
+                models.User.nombres, 
+                models.User.apellidos,
+                models.User.email
+            )
+        )
+    )
+    
+    if course_id:
+        query = query.join(
+            models.Enrollment,
+            models.Enrollment.estudiante_id == models.Student.id
+        ).filter(models.Enrollment.curso_id == course_id)
+    
+    return query.all()
 
 @router.get("/students", response_model=List[schemas.StudentOut])
 def list_students(
