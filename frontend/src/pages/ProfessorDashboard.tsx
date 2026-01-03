@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import api from '../api/client'
 import DeleteIcon from '@mui/icons-material/Delete';
 import { Course, Student, Attendance, User } from '../types'
-import { Box, Paper, Typography, List, ListItem, ListItemButton, ListItemText, Divider, Button, Alert, TextField, IconButton } from '@mui/material'
+import { Box, Paper, Typography, List, ListItem, ListItemButton, ListItemText, Divider, Button, Alert, TextField, IconButton, Grid } from '@mui/material'
 
 export default function ProfessorDashboard() {
   const [courses, setCourses] = useState<Course[]>([])
@@ -170,11 +170,6 @@ export default function ProfessorDashboard() {
       const recognized = res.data?.recognized || [];
       const summary = res.data?.session_summary || {};
       
-      setMsg(
-        `Reconocimiento completado. ` +
-        `Presentes: ${summary.present || 0}, ` +
-        `Ausentes: ${summary.absent || 0}`
-      );
       
       // 2. Actualizar inmediatamente la asistencia y estudiantes
       const today = new Date();
@@ -276,170 +271,252 @@ export default function ProfessorDashboard() {
   };
 
   return (
-    <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 2, p: 2 }}>
-      <Paper sx={{ p: 2 }}>
-        <Typography variant="h6" mb={1}>Mis cursos</Typography>
-        <List>
-          {courses.map(c => (
-            <ListItemButton key={c.id} selected={selected?.id === c.id} onClick={() => setSelected(c)}>
-              <ListItemText primary={c.nombre} secondary={`${c.codigo}${c.horario ? ' · '+c.horario: ''}`} />
-            </ListItemButton>
-          ))}
-          {courses.length === 0 && <Typography variant="body2" color="text.secondary">No hay cursos</Typography>}
-        </List>
-      </Paper>
+    <Box sx={{ p: 2 }}>
+      {/* Fila superior: Mis cursos y Reconocimiento en vivo */}
+      <Grid container spacing={2} sx={{ mb: 2 }}>
+        <Grid item xs={12} md={4}>
+          <Paper sx={{ p: 2, height: '100%' }}>
+            <Typography variant="h6" mb={1}>Mis cursos</Typography>
+            <List>
+              {courses.map(c => (
+                <ListItemButton key={c.id} selected={selected?.id === c.id} onClick={() => setSelected(c)}>
+                  <ListItemText primary={c.nombre} secondary={`${c.codigo}${c.horario ? ' · '+c.horario: ''}`} />
+                </ListItemButton>
+              ))}
+              {courses.length === 0 && <Typography variant="body2" color="text.secondary">No hay cursos</Typography>}
+            </List>
+          </Paper>
+        </Grid>
 
-      <Paper sx={{ p: 2 }}>
-        <Typography variant="h6" mb={1}>Reconocimiento en vivo</Typography>
-        <List dense>
-          {live.map(item => {
-            const confidence = item.confidence ?? 0;
-            const hasCode = item.codigo && item.codigo !== 'Desconocido';
-            
-            return (
-              <ListItem 
-                key={item.ts} 
-                sx={{ 
-                  bgcolor: hasCode ? 'info.light' : 'background.paper',
-                  mb: 0.5,
-                  borderRadius: 1,
-                  borderLeft: hasCode ? '3px solid' : 'none',
-                  borderColor: hasCode ? 'info.main' : 'transparent'
-                }}
-              >
-                <ListItemText 
-                  primary={
-                    <Typography 
-                      variant="body2" 
-                      color={hasCode ? 'info.dark' : 'text.secondary'}
-                      fontWeight={hasCode ? 'medium' : 'normal'}
-                    >
-                      {item.codigo || 'Desconocido'}
-                    </Typography>
-                  }
-                  secondary={
-                    <Typography variant="caption" color="text.secondary">
-                      {`${(confidence * 100).toFixed(1)}% confianza · ${new Date(item.ts).toLocaleTimeString()}`}
-                    </Typography>
-                  }
-                />
-              </ListItem>
-            );
-          })}
-          {live.length === 0 && (
-            <Typography variant="body2" color="text.secondary" sx={{ p: 2, textAlign: 'center' }}>
-              {wsConnected ? 'Esperando detecciones...' : 'Conecte el WebSocket para ver reconocimiento en tiempo real'}
-            </Typography>
-          )}
-        </List>
-      </Paper>
+        <Grid item xs={12} md={8}>
+          <Paper sx={{ p: 2, height: '100%' }}>
+            <Typography variant="h6" mb={1}>Reconocimiento en vivo</Typography>
+            <List dense sx={{ maxHeight: 300, overflow: 'auto' }}>
+              {live.map(item => {
+                const confidence = item.confidence ?? 0;
+                const hasCode = item.codigo && item.codigo !== 'Desconocido';
+                
+                return (
+                  <ListItem 
+                    key={item.ts} 
+                    sx={{ 
+                      bgcolor: hasCode ? 'info.light' : 'background.paper',
+                      mb: 0.5,
+                      borderRadius: 1,
+                      borderLeft: hasCode ? '3px solid' : 'none',
+                      borderColor: hasCode ? 'info.main' : 'transparent'
+                    }}
+                  >
+                    <ListItemText 
+                      primary={
+                        <Typography 
+                          variant="body2" 
+                          color={hasCode ? 'info.dark' : 'text.secondary'}
+                          fontWeight={hasCode ? 'medium' : 'normal'}
+                        >
+                          {item.codigo || 'Desconocido'}
+                        </Typography>
+                      }
+                      secondary={
+                        <Typography variant="caption" color="text.secondary">
+                          {`${(confidence * 100).toFixed(1)}% confianza · ${new Date(item.ts).toLocaleTimeString()}`}
+                        </Typography>
+                      }
+                    />
+                  </ListItem>
+                );
+              })}
+              {live.length === 0 && (
+                <Typography variant="body2" color="text.secondary" sx={{ p: 2, textAlign: 'center' }}>
+                  {wsConnected ? 'Esperando detecciones...' : 'Conecte el WebSocket para ver reconocimiento en tiempo real'}
+                </Typography>
+              )}
+            </List>
+          </Paper>
+        </Grid>
+      </Grid>
 
-      <Paper sx={{ p: 2, flex: 1 }}>
-        <Typography variant="h6" mb={1}>{selected ? selected.nombre : 'Selecciona un curso'}</Typography>
+      {/* Sección principal: Detalles del curso seleccionado */}
+      <Paper sx={{ p: 3, mb: 2 }}>
+        <Typography variant="h5" mb={2}>{selected ? selected.nombre : 'Selecciona un curso'}</Typography>
         <Divider sx={{ mb: 2 }} />
-        {err && <Alert severity="error" sx={{ mb: 1 }}>{err}</Alert>}
-        {msg && <Alert severity="success" sx={{ mb: 1 }}>{msg}</Alert>}
-        {trainMsg && <Alert severity="info" sx={{ mb: 1 }}>{trainMsg}</Alert>}
-        <Box sx={{ display: 'flex', gap: 1, mb: 2, flexWrap: 'wrap' }}>
-          <Button variant="outlined" onClick={() => {
-            if (selected) {
-              trainModel(selected.id, selected.nombre);
-            } else {
-              setErr('Por favor selecciona un curso primero');
-            }
-          }} disabled={trainLoading || !selected}>{trainLoading ? 'Entrenando...' : 'Entrenar modelo'}</Button>
-          <Button variant="outlined" onClick={connectWS} disabled={!selected || wsConnected}>Conectar WS</Button>
-          <Button variant="outlined" onClick={disconnectWS} disabled={!wsConnected}>Desconectar WS</Button>
-          <Typography variant="body2" color="text.secondary">{wsConnected ? 'WS conectado' : 'WS desconectado'}</Typography>
+        
+        {err && <Alert severity="error" sx={{ mb: 2 }}>{err}</Alert>}
+        {msg && <Alert severity="success" sx={{ mb: 2 }}>{msg}</Alert>}
+        {trainMsg && <Alert severity="info" sx={{ mb: 2 }}>{trainMsg}</Alert>}
+        
+        {/* Controles principales */}
+        <Box sx={{ display: 'flex', gap: 1, mb: 3, flexWrap: 'wrap', alignItems: 'center' }}>
+          <Button 
+            variant="outlined" 
+            onClick={() => {
+              if (selected) {
+                trainModel(selected.id, selected.nombre);
+              } else {
+                setErr('Por favor selecciona un curso primero');
+              }
+            }} 
+            disabled={trainLoading || !selected}
+          >
+            {trainLoading ? 'Entrenando...' : 'Entrenar modelo'}
+          </Button>
+          <Button variant="outlined" onClick={connectWS} disabled={!selected || wsConnected}>
+            Conectar WS
+          </Button>
+          <Button variant="outlined" onClick={disconnectWS} disabled={!wsConnected}>
+            Desconectar WS
+          </Button>
+          <Typography variant="body2" color="text.secondary" sx={{ ml: 1 }}>
+            {wsConnected ? '● WS conectado' : '○ WS desconectado'}
+          </Typography>
         </Box>
-        <Box sx={{ display: 'flex', gap: 1, mb: 2 }}>
-          <Button variant="contained" disabled={!selected || loading} onClick={startRecognition}>
+
+        <Box sx={{ mb: 3 }}>
+          <Button 
+            variant="contained" 
+            size="large"
+            disabled={!selected || loading} 
+            onClick={startRecognition}
+          >
             {loading ? 'Iniciando...' : 'Iniciar Reconocimiento'}
           </Button>
         </Box>
+
+        {/* Matricular estudiante */}
         {selected && (
-          <Box sx={{ display: 'flex', gap: 1, mb: 2, alignItems: 'center' }}>
-            <TextField size="small" label="CUI estudiante" value={enrollCui} onChange={e=>setEnrollCui(e.target.value)} />
-            <Button variant="outlined" onClick={enrollByCui} disabled={!enrollCui}>Matricular</Button>
+          <Box sx={{ display: 'flex', gap: 1, mb: 3, alignItems: 'center' }}>
+            <TextField 
+              size="small" 
+              label="CUI estudiante" 
+              value={enrollCui} 
+              onChange={e => setEnrollCui(e.target.value)} 
+            />
+            <Button variant="outlined" onClick={enrollByCui} disabled={!enrollCui}>
+              Matricular
+            </Button>
           </Box>
         )}
-        <Typography variant="subtitle1" gutterBottom>Estudiantes</Typography>
-        <List dense>
+
+        {/* Lista de estudiantes en formato grid */}
+        <Typography variant="h6" gutterBottom sx={{ mb: 2 }}>
+          Estudiantes {students.length > 0 && `(${students.length})`}
+        </Typography>
+        
+        <Grid container spacing={2}>
           {students.map(student => {
-            // Buscar asistencia del estudiante para hoy (SOLO de Iniciar Reconocimiento)
             const studentAttendance = attendance.find(a => a.estudiante_id === student.id);
             const isPresent = studentAttendance?.estado === 'presente';
-            
-            // Los colores verde/rojo SOLO se muestran si hay registro de asistencia oficial
-            // (no del WebSocket de prueba)
             const studentData = studentAttendance?.student || student;
             const userName = studentData.user 
               ? `${studentData.user.nombres}`.trim()
               : 'Estudiante sin nombre';
 
             return (
-              <div 
-                key={student.id} 
-                className="student-card"
-                style={{ 
-                  border: `2px solid ${isPresent ? '#2e7d32' : '#d32f2f'}`,
-                  backgroundColor: isPresent ? 'rgba(46, 125, 50, 0.1)' : 'rgba(211, 47, 47, 0.1)',
-                  borderRadius: '8px',
-                  padding: '12px',
-                  marginBottom: '8px',
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center'
-                }}
-              >
-                <div>
-                  <div style={{ fontWeight: 'bold', color: '#000' }}>
-                    {student.codigo} - {userName}
-                  </div>
-                  <div style={{ fontSize: '0.85rem', color: '#555' }}>
-                    {student.carrera}
-                  </div>
-                </div>
-                <div style={{ textAlign: 'right' }}>
-                  <div style={{ 
-                    color: '#000',
-                    fontWeight: 'bold',
+              <Grid item xs={12} sm={6} md={4} lg={3} key={student.id}>
+                <Paper
+                  elevation={2}
+                  sx={{ 
+                    border: `2px solid ${isPresent ? '#2e7d32' : '#d32f2f'}`,
+                    backgroundColor: isPresent ? 'rgba(46, 125, 50, 0.05)' : 'rgba(211, 47, 47, 0.05)',
+                    borderRadius: 2,
+                    p: 2,
+                    height: '100%',
                     display: 'flex',
-                    alignItems: 'center',
-                    gap: '8px'
-                  }}>
-                    {isPresent ? 'Presente' : 'Ausente'}
-                  </div>
+                    flexDirection: 'column',
+                    transition: 'all 0.2s',
+                    '&:hover': {
+                      boxShadow: 4,
+                      transform: 'translateY(-2px)'
+                    }
+                  }}
+                >
+                  <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1 }}>
+                    <Typography 
+                      variant="subtitle2" 
+                      sx={{ 
+                        fontWeight: 'bold',
+                        color: isPresent ? '#2e7d32' : '#d32f2f'
+                      }}
+                    >
+                      {isPresent ? '✓ Presente' : '✗ Ausente'}
+                    </Typography>
+                    <IconButton 
+                      size="small" 
+                      onClick={() => removeStudent(student.id)}
+                      sx={{ ml: 1 }}
+                    >
+                      <DeleteIcon fontSize="small" />
+                    </IconButton>
+                  </Box>
+                  
+                  <Typography variant="body1" fontWeight="bold" gutterBottom>
+                    {student.codigo}
+                  </Typography>
+                  
+                  <Typography variant="body2" gutterBottom>
+                    {userName}
+                  </Typography>
+                  
+                  <Typography variant="caption" color="text.secondary" gutterBottom>
+                    {student.carrera}
+                  </Typography>
+                  
                   {studentAttendance?.fecha_hora && (
-                    <div style={{ fontSize: '0.8rem', color: '#666' }}>
+                    <Typography variant="caption" color="text.secondary" sx={{ mt: 'auto', pt: 1 }}>
                       {new Date(studentAttendance.fecha_hora).toLocaleString('es-ES', {
                         day: '2-digit',
                         month: '2-digit',
-                        year: 'numeric',
                         hour: '2-digit',
                         minute: '2-digit'
                       })}
-                    </div>
+                    </Typography>
                   )}
-                </div>
-              </div>
+                </Paper>
+              </Grid>
             );
           })}
-          {selected && students.length === 0 && (
-            <Typography variant="body2" color="text.secondary">
-              Sin estudiantes matriculados en este curso
-            </Typography>
-          )}
-        </List>
+        </Grid>
+
+        {selected && students.length === 0 && (
+          <Typography variant="body2" color="text.secondary" sx={{ textAlign: 'center', py: 4 }}>
+            Sin estudiantes matriculados en este curso
+          </Typography>
+        )}
       </Paper>
 
+      {/* Sección crear curso - Compacta en la parte inferior */}
       <Paper sx={{ p: 2 }}>
-        <Typography variant="h6" mb={1}>Crear curso</Typography>
-        <Box sx={{ display: 'flex', gap: 1, mb: 2, flexWrap: 'wrap' }}>
-          <TextField size="small" label="Nombre" value={newName} onChange={e=>setNewName(e.target.value)} />
-          <TextField size="small" label="Código" value={newCode} onChange={e=>setNewCode(e.target.value)} />
-          <TextField size="small" label="Horario" value={newHorario} onChange={e=>setNewHorario(e.target.value)} />
-          <Button variant="contained" onClick={createCourse} disabled={!newName || !newCode}>Crear</Button>
+        <Typography variant="subtitle2" mb={1} color="text.secondary">Crear nuevo curso</Typography>
+        <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', alignItems: 'center' }}>
+          <TextField 
+            size="small" 
+            label="Nombre" 
+            value={newName} 
+            onChange={e => setNewName(e.target.value)}
+            sx={{ minWidth: 200 }}
+          />
+          <TextField 
+            size="small" 
+            label="Código" 
+            value={newCode} 
+            onChange={e => setNewCode(e.target.value)}
+            sx={{ minWidth: 120 }}
+          />
+          <TextField 
+            size="small" 
+            label="Horario" 
+            value={newHorario} 
+            onChange={e => setNewHorario(e.target.value)}
+            sx={{ minWidth: 150 }}
+          />
+          <Button 
+            variant="contained" 
+            size="small"
+            onClick={createCourse} 
+            disabled={!newName || !newCode}
+          >
+            Crear
+          </Button>
         </Box>
       </Paper>
     </Box>
