@@ -1,11 +1,43 @@
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import Session, joinedload
 from ...deps import get_db, require_role, get_current_user
 from ... import models, schemas
 
 router = APIRouter()
+@router.delete("/courses/{course_id}/students/{student_id}")
+def remove_student_from_course(
+    course_id: int,
+    student_id: int,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(require_role(models.UserRole.docente, models.UserRole.admin)),
+):
+    # Validar curso
+    course = db.get(models.Course, course_id)
+    if not course:
+        raise HTTPException(status_code=404, detail="Curso no encontrado")
+    if user.rol == models.UserRole.docente and course.docente_id != user.id:
+        raise HTTPException(status_code=403, detail="No autorizado para este curso")
+
+    # Validar student
+    student = db.get(models.Student, student_id)
+    if not student:
+        raise HTTPException(status_code=404, detail="Estudiante no encontrado")
+
+    enrollment = (
+        db.query(models.Enrollment)
+        .filter(
+            models.Enrollment.curso_id == course_id,
+            models.Enrollment.estudiante_id == student_id
+        )
+        .first()
+    )
+    if not enrollment:
+        raise HTTPException(status_code=404, detail="El estudiante no está matriculado en este curso")
+
+    db.delete(enrollment)
+    db.commit()
+    return {"detail": "Estudiante removido del curso"}
 
 @router.get("/", response_model=List[schemas.StudentResponse])
 def get_students(
@@ -49,6 +81,13 @@ def list_students(
     # Para docente o admin con filtro por curso: unir una sola vez
     q = (
         db.query(models.Student)
+        .options(
+            joinedload(models.Student.user).load_only(
+                models.User.nombres,
+                models.User.apellidos,
+                models.User.email
+            )
+        )
         .join(models.Enrollment, models.Enrollment.estudiante_id == models.Student.id)
     )
     if course_id is not None:

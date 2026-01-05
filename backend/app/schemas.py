@@ -57,6 +57,7 @@ class StudentOut(BaseModel):
     uses_glasses: bool
     uses_cap: bool
     uses_mask: bool
+    user: Optional[UserBase] = None
 
     class Config:
         from_attributes = True

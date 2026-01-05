@@ -1,8 +1,7 @@
 from typing import List, Optional
 from datetime import datetime, date
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import Session, joinedload
 from ...deps import get_db, get_current_user, require_role
 from ... import models, schemas
 
@@ -16,6 +15,13 @@ def list_attendance(
     user: models.User = Depends(get_current_user),
 ):
     q = db.query(models.Attendance)
+    q = q.options(
+        joinedload(models.Attendance.student).joinedload(models.Student.user).load_only(
+            models.User.nombres,
+            models.User.apellidos,
+            models.User.email
+        )
+    )
     if course_id:
         q = q.filter(models.Attendance.curso_id == course_id)
     if on_date:

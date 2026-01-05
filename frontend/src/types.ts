@@ -43,4 +43,5 @@ export type Attendance = {
   curso_id: number
   estado: 'presente' | 'ausente'
   fecha_hora?: string
+  student?: Student
 }

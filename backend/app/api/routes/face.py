@@ -78,6 +78,9 @@ except Exception as e:
     raise
 
 
+MIN_FACE_CONF = 0.70  # Umbral mínimo para marcar asistencia (equivale a 80% voto + distancia)
+MAX_L2_DISTANCE = 1.20  # Distancia máxima aceptable (menor = más similar)
+
 def lima_now() -> datetime:
     try:
         if ZoneInfo is not None:
@@ -310,35 +313,37 @@ def _mark_attendance(db: Session, codigo: str, course_id: int):
 
 
 def _finalize_attendance_for_session(db: Session, course_id: int, recognized_cuis: set[str]):
-    """Marca como ausentes a los estudiantes no reconocidos"""
-    # Obtener todos los estudiantes matriculados
+    """No marca ausentes automáticamente; solo devuelve el resumen de reconocidos."""
     enrolled_students = db.query(models.Student).join(
         models.Enrollment,
         models.Enrollment.estudiante_id == models.Student.id
     ).filter(
         models.Enrollment.curso_id == course_id
     ).all()
+
     today = datetime.utcnow().date()
-    
-    for student in enrolled_students:
-        # Verificar si el estudiante ya tiene registro de asistencia hoy
-        existing = db.query(models.Attendance).filter(
-            models.Attendance.estudiante_id == student.id,
+    attendance_records = (
+        db.query(models.Attendance)
+        .filter(
             models.Attendance.curso_id == course_id,
             models.Attendance.fecha_hora >= today,
             models.Attendance.fecha_hora < today + timedelta(days=1)
-        ).first()
-        if not existing:
-            # Marcar como ausente
-            attendance = models.Attendance(
-                estudiante_id=student.id,
-                curso_id=course_id,
-                fecha_hora=datetime.utcnow(),
-                estado=models.AttendanceState.ausente
-            )
-            db.add(attendance)
-    
-    db.commit()
+        )
+        .all()
+    )
+
+    present_student_ids = {att.estudiante_id for att in attendance_records if att.estado == models.AttendanceState.presente}
+    absent_candidates = []
+    for stu in enrolled_students:
+        if stu.id not in present_student_ids:
+            absent_candidates.append(stu.codigo)
+
+    summary = {
+        "recognized": sorted(list(recognized_cuis)),
+        "present_count": len(present_student_ids),
+        "absent_candidates": absent_candidates
+    }
+    return summary
 
 
 @router.get("/recognize/start")
@@ -373,6 +378,15 @@ def recognize_start(
     # Obtener códigos (CUI) de estudiantes matriculados
     enrolled_cuis = {stu.codigo for stu in enrolled_students}
     logger.info(f"Estudiantes matriculados en el curso {course_id}: {sorted(enrolled_cuis)}")
+
+    # Limpiar asistencias del día para este curso antes de iniciar nueva sesión
+    today = datetime.utcnow().date()
+    db.query(models.Attendance).filter(
+        models.Attendance.curso_id == course_id,
+        models.Attendance.fecha_hora >= today,
+        models.Attendance.fecha_hora < today + timedelta(days=1)
+    ).delete(synchronize_session=False)
+    db.commit()
 
     # Cargar el modelo FAISS específico del curso
     model_info = _load_classifier(course_id=course_id)
@@ -423,9 +437,15 @@ def recognize_start(
                 
             # Procesar cada detección
             for det in detections:
+                # Filtro de calidad de detección para reducir falsos positivos
+                det_conf = float(det.get('confidence', 0) or 0)
                 x, y, w, h = det.get('box', [0, 0, 0, 0])
                 x, y = abs(x), abs(y)
                 if w <= 0 or h <= 0:
+                    continue
+                if det_conf < 0.90:
+                    continue
+                if (w * h) < (60 * 60):
                     continue
 
                 face = rgb[y:y+h, x:x+w]
@@ -463,13 +483,13 @@ def recognize_start(
                     is_enrolled = label in enrolled_cuis
                     
                     # Registrar reconocimiento si supera el umbral Y pertenece al curso
-                    if conf >= settings.CONFIDENCE_THRESHOLD and is_enrolled:
+                    if (conf >= MIN_FACE_CONF and is_enrolled) and distances[0][0] <= MAX_L2_DISTANCE:
                         recognized_cuis.add(label)
                         recognized.append({"codigo": label, "confidence": float(conf)})
                         
                         # Marcar asistencia
                         _mark_attendance(db, label, course_id)
-                    elif conf >= settings.CONFIDENCE_THRESHOLD and not is_enrolled:
+                    elif conf >= MIN_FACE_CONF and not is_enrolled and distances[0][0] <= MAX_L2_DISTANCE:
                         # Reconocido pero no pertenece al curso - marcar como desconocido
                         logger.warning(f"Estudiante {label} reconocido pero no está matriculado en el curso {course_id}")
                         recognized.append({"codigo": "Desconocido", "confidence": float(conf), "original_label": label})
@@ -868,11 +888,18 @@ async def recognize_ws(websocket: WebSocket, course_id: int):
                 
             # Tomar el rostro con mayor confianza
             det = max(detections, key=lambda d: d.get('confidence', 0))
+            det_conf = float(det.get('confidence', 0) or 0)
             x, y, w, h = det.get('box', [0, 0, 0, 0])
             x, y = abs(x), abs(y)
             
             if w <= 0 or h <= 0:
                 await websocket.send_json({"event": "invalid_box"})
+                continue
+            if det_conf < 0.90:
+                await websocket.send_json({"event": "low_conf_face"})
+                continue
+            if (w * h) < (60 * 60):
+                await websocket.send_json({"event": "small_face"})
                 continue
                 
             # Extraer el rostro
@@ -916,10 +943,16 @@ async def recognize_ws(websocket: WebSocket, course_id: int):
                 is_enrolled = label in enrolled_cuis
                 
                 # Determinar el código a enviar
-                if conf >= settings.CONFIDENCE_THRESHOLD and is_enrolled:
+                attendance_marked = False
+                if (conf >= MIN_FACE_CONF and is_enrolled) and distances[0][0] <= MAX_L2_DISTANCE:
                     # Reconocido y matriculado - enviar código del estudiante
                     final_codigo = label
-                elif conf >= settings.CONFIDENCE_THRESHOLD and not is_enrolled:
+                    try:
+                        _mark_attendance(db_live, label, course_id)
+                        attendance_marked = True
+                    except Exception as e:
+                        logger.error(f"WebSocket: No se pudo marcar asistencia para {label}: {e}")
+                elif conf >= MIN_FACE_CONF and not is_enrolled and distances[0][0] <= MAX_L2_DISTANCE:
                     # Reconocido pero no matriculado - marcar como desconocido
                     final_codigo = "Desconocido"
                     logger.warning(f"WebSocket: Estudiante {label} reconocido pero no está matriculado en el curso {course_id}")
@@ -935,6 +968,12 @@ async def recognize_ws(websocket: WebSocket, course_id: int):
                     "model_type": "faiss",
                     "is_enrolled": is_enrolled if conf >= settings.CONFIDENCE_THRESHOLD else False
                 })
+                if attendance_marked:
+                    await websocket.send_json({
+                        "event": "attendance_marked",
+                        "codigo": final_codigo,
+                        "confidence": float(conf)
+                    })
                 
             except Exception as e:
                 logger.error(f"Error en la predicción: {e}")
@@ -944,4 +983,5 @@ async def recognize_ws(websocket: WebSocket, course_id: int):
                 })
     finally:
         cap.release()
+        db_live.close()
         await websocket.close()

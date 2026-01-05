@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=120)
 
     CAMERA_INDEX: int = Field(default=0)
-    CONFIDENCE_THRESHOLD: float = Field(default=0.6)
+    CONFIDENCE_THRESHOLD: float = Field(default=0.7)
 
     @property
     def SQLALCHEMY_DATABASE_URI(self) -> str:
@@ -27,7 +27,6 @@ class Settings(BaseSettings):
         )
 
     class Config:
-        # Load env from backend/.env regardless of where uvicorn is started
         env_file = str(Path(__file__).resolve().parents[2] / ".env")
 
 settings = Settings()

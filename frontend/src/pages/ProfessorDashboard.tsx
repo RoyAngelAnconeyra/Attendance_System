@@ -22,6 +22,9 @@ export default function ProfessorDashboard() {
   const [live, setLive] = useState<Array<{ codigo?: string, confidence?: number, event?: string, ts: number }>>([])
   const wsTick = useRef<number | null>(null)
   const [attendance, setAttendance] = useState<Attendance[]>([])
+  const [refreshTick, setRefreshTick] = useState(0)
+
+  const bumpRefresh = () => setRefreshTick((v) => v + 1)
 
   useEffect(() => {
     const run = async () => {
@@ -84,18 +87,25 @@ export default function ProfessorDashboard() {
       try {
         const data = JSON.parse(ev.data);
         const ts = Date.now();
-        if (data.type === 'recognition_completed') {
-          // Actualizar el estado de asistencia
-          const today = new Date().toISOString().slice(0, 10);
+
+        const today = new Date().toISOString().slice(0, 10);
+        const refreshAttendance = () => {
+          if (!selected) return;
           api.get('/attendance', { 
             params: { 
-              course_id: selected?.id, 
+              course_id: selected.id, 
               on_date: today 
             } 
-          }).then(res => {
-            setAttendance(res.data || []);
-          });
+          }).then(res => setAttendance(res.data || []))
+            .catch(() => {});
+        };
+
+        if (data.type === 'recognition_completed' || data.event === 'attendance_marked') {
+          console.log('[WS] Evento asistencia', data);
+          refreshAttendance();
+          bumpRefresh();
         }
+
         // Mantener la lógica existente para actualizaciones en tiempo real
         setLive(prev => {
           const newLive = [{ ...data, ts }, ...prev].slice(0, 20);
@@ -149,13 +159,16 @@ export default function ProfessorDashboard() {
       }
     }
     run()
-  }, [selected, msg])
+  }, [selected, msg, refreshTick])
 
   const startRecognition = async () => {
     if (!selected) return;
     setLoading(true);
     setMsg(null);
     setErr(null);
+    // Limpiar resultados previos para evitar mostrar asistencias antiguas
+    setLive([]);
+    setAttendance([]);
     
     try {
       // 1. Iniciar el reconocimiento oficial (marca asistencia)
@@ -169,6 +182,7 @@ export default function ProfessorDashboard() {
       // El backend devuelve información detallada del reconocimiento
       const recognized = res.data?.recognized || [];
       const summary = res.data?.session_summary || {};
+      console.log('[Reconocimiento] Resumen', { recognized, summary });
       
       
       // 2. Actualizar inmediatamente la asistencia y estudiantes
@@ -208,6 +222,7 @@ export default function ProfessorDashboard() {
             };
           }));
         }
+        bumpRefresh();
       } catch (e) {
         console.error('Error al actualizar la asistencia:', e);
       }
@@ -397,91 +412,68 @@ export default function ProfessorDashboard() {
           </Box>
         )}
 
-        {/* Lista de estudiantes en formato grid */}
+        {/* Lista de estudiantes en filas */}
         <Typography variant="h6" gutterBottom sx={{ mb: 2 }}>
           Estudiantes {students.length > 0 && `(${students.length})`}
         </Typography>
         
-        <Grid container spacing={2}>
+        <List dense>
           {students.map(student => {
             const studentAttendance = attendance.find(a => a.estudiante_id === student.id);
             const isPresent = studentAttendance?.estado === 'presente';
             const studentData = studentAttendance?.student || student;
             const userName = studentData.user 
-              ? `${studentData.user.nombres}`.trim()
+              ? `${studentData.user.nombres} ${studentData.user.apellidos}`.trim()
               : 'Estudiante sin nombre';
+            const fechaLabel = studentAttendance?.fecha_hora 
+              ? new Date(studentAttendance.fecha_hora).toLocaleString('es-PE', { timeZone: 'America/Lima', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+              : 'Sin marca';
 
             return (
-              <Grid item xs={12} sm={6} md={4} lg={3} key={student.id}>
-                <Paper
-                  elevation={2}
-                  sx={{ 
-                    border: `2px solid ${isPresent ? '#2e7d32' : '#d32f2f'}`,
-                    backgroundColor: isPresent ? 'rgba(46, 125, 50, 0.05)' : 'rgba(211, 47, 47, 0.05)',
-                    borderRadius: 2,
-                    p: 2,
-                    height: '100%',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    transition: 'all 0.2s',
-                    '&:hover': {
-                      boxShadow: 4,
-                      transform: 'translateY(-2px)'
-                    }
-                  }}
-                >
-                  <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1 }}>
-                    <Typography 
-                      variant="subtitle2" 
-                      sx={{ 
-                        fontWeight: 'bold',
-                        color: isPresent ? '#2e7d32' : '#d32f2f'
-                      }}
-                    >
-                      {isPresent ? '✓ Presente' : '✗ Ausente'}
+              <ListItem
+                key={student.id}
+                sx={{
+                  border: `2px solid ${isPresent ? '#2e7d32' : '#d32f2f'}`,
+                  backgroundColor: isPresent ? 'rgba(46, 125, 50, 0.06)' : 'rgba(211, 47, 47, 0.06)',
+                  borderRadius: 1.5,
+                  mb: 1,
+                  alignItems: 'center'
+                }}
+                secondaryAction={
+                  <IconButton edge="end" aria-label="delete" onClick={() => removeStudent(student.id)}>
+                    <DeleteIcon fontSize="small" />
+                  </IconButton>
+                }
+              >
+                <ListItemText
+                  primary={
+                    <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
+                      <Typography variant="subtitle2" sx={{ color: isPresent ? '#2e7d32' : '#d32f2f', fontWeight: 700 }}>
+                        {isPresent ? 'Presente' : 'Ausente'}
+                      </Typography>
+                      <Typography variant="body1" fontWeight="bold">
+                        {student.codigo}
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        {userName} · {student.carrera}
+                      </Typography>
+                    </Box>
+                  }
+                  secondary={
+                    <Typography variant="caption" color="text.secondary">
+                      {fechaLabel}
                     </Typography>
-                    <IconButton 
-                      size="small" 
-                      onClick={() => removeStudent(student.id)}
-                      sx={{ ml: 1 }}
-                    >
-                      <DeleteIcon fontSize="small" />
-                    </IconButton>
-                  </Box>
-                  
-                  <Typography variant="body1" fontWeight="bold" gutterBottom>
-                    {student.codigo}
-                  </Typography>
-                  
-                  <Typography variant="body2" gutterBottom>
-                    {userName}
-                  </Typography>
-                  
-                  <Typography variant="caption" color="text.secondary" gutterBottom>
-                    {student.carrera}
-                  </Typography>
-                  
-                  {studentAttendance?.fecha_hora && (
-                    <Typography variant="caption" color="text.secondary" sx={{ mt: 'auto', pt: 1 }}>
-                      {new Date(studentAttendance.fecha_hora).toLocaleString('es-ES', {
-                        day: '2-digit',
-                        month: '2-digit',
-                        hour: '2-digit',
-                        minute: '2-digit'
-                      })}
-                    </Typography>
-                  )}
-                </Paper>
-              </Grid>
+                  }
+                />
+              </ListItem>
             );
           })}
-        </Grid>
-
-        {selected && students.length === 0 && (
-          <Typography variant="body2" color="text.secondary" sx={{ textAlign: 'center', py: 4 }}>
-            Sin estudiantes matriculados en este curso
-          </Typography>
-        )}
+          {selected && students.length === 0 && (
+            <Typography variant="body2" color="text.secondary" sx={{ textAlign: 'center', py: 2 }}>
+              Sin estudiantes matriculados en este curso
+            </Typography>
+          )}
+        </List>
       </Paper>
 
       {/* Sección crear curso - Compacta en la parte inferior */}
